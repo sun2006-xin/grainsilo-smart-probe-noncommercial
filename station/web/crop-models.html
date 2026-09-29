@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>作物模型 · 粮仓集成监控中心</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/crop-models.css">
+</head>
+<body class="crop-page">
+<div class="app-content">
+  <header class="topbar crop-topbar">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true"><img src="/assets/img/grain-mark.svg" alt=""></div>
+      <div>
+        <h1>粮仓集成监控中心</h1>
+        <div class="sub">GrainSilo · 本地数据中心</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="health-pill pending" id="pageStatus" role="status">正在读取粮堆…</span>
+      <a class="ghost crop-back" href="index.html">返回仓库总览</a>
+    </div>
+    <nav class="app-nav" aria-label="主导航">
+      <a data-page="overview" href="/index.html">仓库总览</a>
+      <a data-page="piles" href="/piles.html">粮堆管理</a>
+      <a data-page="probes" href="/probes.html">探杆管理</a>
+      <a data-page="environment" href="/environment.html">环境监测</a>
+      <a data-page="alerts" href="/alerts.html">告警中心</a>
+      <a data-page="history" href="/db.html">历史数据库</a>
+      <a class="active" data-page="crop" href="/crop-models.html" aria-current="page">作物模型</a>
+    </nav>
+  </header>
+
+  <main class="crop-main">
+    <section class="crop-intro">
+      <div>
+        <p class="crop-eyebrow">CROP EQUILIBRIUM MODEL</p>
+        <h2>空气状态对应的<br><span>平衡含水率参考值</span></h2>
+        <p class="crop-lede">先选定粮堆和作物模型，再输入空气温度与相对湿度。稻谷、小麦和玉米使用各自来源的曲线，不混用一套通用参数。</p>
+      </div>
+      <aside class="crop-warning">
+        <span class="warning-mark" aria-hidden="true">!</span>
+        <div><b>这是模型估算，不是粮食水分实测</b><p>RH 表示空气相对湿度。页面给出假设充分接近平衡后的参考 EMC；台架空气、探杆空气都不能直接当作粮食含水率。</p></div>
+      </aside>
+    </section>
+
+    <section class="crop-calculator" aria-labelledby="calcTitle">
+      <div class="crop-form-panel">
+        <div class="crop-section-title">
+          <span class="crop-index">01</span>
+          <div><h2 id="calcTitle">选择作物与空气条件</h2><p>情景输入 · 不写入历史数据库</p></div>
+        </div>
+        <form id="cropForm" novalidate>
+          <label class="crop-field">目标粮堆
+            <select id="cropPile" required><option value="">正在读取…</option></select>
+          </label>
+          <label class="crop-field">作物
+            <select id="cropType" required>
+              <option value="">请选择作物</option>
+              <option value="paddy">稻谷</option>
+              <option value="wheat">小麦</option>
+              <option value="corn">玉米</option>
+            </select>
+          </label>
+          <label class="crop-field crop-conditional" id="wheatOptions" hidden>小麦曲线
+            <select id="wheatType"><option value="soft">软麦</option><option value="hard">硬麦</option></select>
+          </label>
+          <label class="crop-field crop-conditional" id="paddyOptions" hidden>稻谷吸湿历史未知时建议保持双路径
+            <select id="paddyPath">
+              <option value="both">同时显示吸附 / 解吸</option>
+              <option value="adsorption">只看吸附曲线</option>
+              <option value="desorption">只看解吸曲线</option>
+            </select>
+          </label>
+          <div class="crop-input-grid">
+            <label class="crop-field">空气温度
+              <span class="crop-input-unit"><input id="tempC" type="number" step="0.1" inputmode="decimal" placeholder="例如 25.0" required><i>°C</i></span>
+            </label>
+            <label class="crop-field">空气相对湿度
+              <span class="crop-input-unit"><input id="rhPct" type="number" step="0.1" inputmode="decimal" placeholder="例如 70.0" required><i>% RH</i></span>
+            </label>
+          </div>
+          <p class="crop-input-note">本版使用手动情景值；请填写与粮食接触的空气状态作为模型输入。输入范围随所选作物模型变化，页面不会外推。</p>
+          <div class="crop-actions">
+            <button class="crop-primary" id="calculateBtn" type="button">计算参考 EMC <span aria-hidden="true">→</span></button>
+            <button class="crop-secondary" id="saveProfileBtn" type="button" disabled>保存粮堆作物设置</button>
+          </div>
+          <p class="crop-save-status" id="profileStatus" role="status">每个粮堆可保存自己的作物与曲线选项。</p>
+        </form>
+      </div>
+
+      <div class="crop-result-panel" aria-live="polite" aria-atomic="true">
+        <div class="crop-result-topline"><span class="crop-index">02</span><span class="estimate-badge">模型 / 文献参考估算</span></div>
+        <div id="resultContent" class="crop-result-content">
+          <div class="result-empty"><span class="empty-glyph" aria-hidden="true">≈</span><h3>等待计算</h3><p>选择粮堆和作物，再输入空气温度与 RH。</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="crop-live-panel" aria-labelledby="liveForecastTitle">
+      <div class="crop-section-title">
+        <span class="crop-index">03</span>
+        <div><h2 id="liveForecastTitle">探杆趋势接入与作物 EMC 情景</h2><p>同一测点分别展示 S3 预测与电脑端独立重算</p></div>
+      </div>
+      <div class="crop-live-controls">
+        <label class="crop-field">当前粮堆的探杆节点
+          <select id="forecastProbe" disabled><option value="">先选择粮堆</option></select>
+        </label>
+        <button class="crop-secondary" id="refreshProbeForecast" type="button">刷新预测</button>
+        <span class="live-forecast-status" id="probeForecastStatus" role="status">尚未读取预测</span>
+      </div>
+      <p class="crop-live-note">预测对象是探杆周围空气温度与相对湿度，不是整堆粮粒温度，也不是粮食含水率。若已选择作物，未来空气情景会再计算对应 EMC 参考值；这不表示粮食会在该时刻达到 EMC。</p>
+      <div class="crop-live-results" id="probeForecastResults" aria-live="polite"><div class="crop-live-empty">选择粮堆和节点后读取 S3 与电脑端预测。</div></div>
+    </section>
+
+    <section class="crop-model-sources" aria-labelledby="sourcesTitle">
+      <div class="crop-section-title">
+        <span class="crop-index">04</span>
+        <div><h2 id="sourcesTitle">三种作物，分别建模</h2><p>来源、品种范围和适用条件在结果中同步显示</p></div>
+      </div>
+      <div class="model-ledger">
+        <article class="model-row model-rice">
+          <span class="model-number">01</span><h3>稻谷</h3>
+          <p><b>Chung–Pfost 拟合</b><br>吸附 / 解吸分别计算；Urucuia 研究样本</p>
+          <span class="model-domain">10–50°C<br>11–76% RH</span>
+        </article>
+        <article class="model-row model-wheat">
+          <span class="model-number">02</span><h3>小麦</h3>
+          <p><b>Modified Chung–Pfost 参考表</b><br>软麦、硬麦曲线分开选择；双线性插值</p>
+          <span class="model-domain">0–30°C<br>50–90% RH</span>
+        </article>
+        <article class="model-row model-corn">
+          <span class="model-number">03</span><h3>玉米</h3>
+          <p><b>Modified Chung–Pfost 参考表</b><br>来源表格内双线性插值，不做范围外推</p>
+          <span class="model-domain">0–30°C<br>50–90% RH</span>
+        </article>
+      </div>
+      <details class="crop-equation">
+        <summary>查看算法说明与来源</summary>
+        <div class="equation-body">
+          <p><b>稻谷：</b><code>Ue(db) = a − b · ln[−(T + c) · ln(RH / 100)]</code>，再换算为湿基；吸附与解吸使用不同参数。</p>
+          <p><b>玉米 / 小麦：</b>使用来源给出的湿基网格表，在相邻温度和 RH 格点间作双线性插值。小麦按软麦或硬麦使用不同表格。</p>
+          <ul>
+            <li><a href="https://doi.org/10.1590/1809-4430-Eng.Agric.v39n4p524-532/2019" target="_blank" rel="noopener noreferrer">Zeymer 等，2019：Urucuia 稻谷吸附与解吸等温线</a></li>
+            <li><a href="https://files.ontario.ca/omafra-natural-air-grain-drying-20-043-en-2023-05-16.pdf" target="_blank" rel="noopener noreferrer">Ontario OMAFRA：Natural-Air Grain Drying，Appendix B EMC 表</a></li>
+          </ul>
+          <p class="source-caution">推广资料和论文样本不是本地品种标定。接入真实粮食前，应通过代表性粮食样本、标准水分仪或实验室烘干法进行校准；本页面不提供风机控制建议。</p>
+        </div>
+      </details>
+    </section>
+  </main>
+</div>
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/crop-models.js"></script>
+</body>
+</html>

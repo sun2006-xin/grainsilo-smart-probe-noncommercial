@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>回收箱 · 粮仓集成监控中心</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div>
+    <h1>回收箱</h1>
+    <div class="sub">删除的探杆可恢复 · 彻底删除将清除全部历史记录（防硬盘膨胀）</div>
+  </div>
+  <div class="topbar-right">
+    <button class="ghost" onclick="location.href='db.html'">← 返回数据库</button>
+  </div>
+</header>
+
+<div class="trash-actions">
+  <button id="trashRefresh">刷新</button>
+  <span class="trash-hint" id="trashHint"></span>
+  <span class="spacer" style="flex:1"></span>
+  <button id="trashEmpty" class="ghost db-danger">清空回收箱（全部彻底删除）</button>
+</div>
+
+<section class="card">
+  <h2>已删除探杆</h2>
+  <table>
+    <thead><tr><th>探杆</th><th>原粮堆</th><th>保留快照数</th><th>电量</th><th>删除时间</th><th>操作</th></tr></thead>
+    <tbody id="trashRows"><tr><td colspan="6">加载中…</td></tr></tbody>
+  </table>
+</section>
+
+<script src="/assets/js/common.js"></script>
+<script>
+/* ============ 回收箱：恢复 / 彻底删除 / 清空 ============ */
+function batPct(mv) {
+  if (!mv) return null;
+  var p = (mv - 3300) / (4200 - 3300) * 100;
+  return Math.round(Math.max(0, Math.min(100, p)));
+}
+
+async function loadTrash() {
+  var tb = document.getElementById("trashRows");
+  try {
+    var list = await apiGet("/api/v1/trash");
+    document.getElementById("trashHint").textContent =
+      "共 " + list.length + " 个已删除探杆" +
+      (list.length ? " · 恢复后自动回到原粮堆" : " · 删除探杆后数据将出现在这里");
+    if (!list.length) {
+      tb.innerHTML = '<tr><td colspan="6" style="color:#7d93b8">回收箱为空</td></tr>';
+      return;
+    }
+    tb.innerHTML = list.map(function (t) {
+      var bat = batPct(t.bat_mv);
+      return "<tr>" +
+        "<td>" + esc(t.name) + '<div style="color:#4a5a75;font-size:11px">' + esc(t.uid) + "</div></td>" +
+        "<td>" + (t.pile_name ? esc(t.pile_name) : '<span style="color:#4a5a75">未绑定</span>') + "</td>" +
+        "<td>" + t.snap_count + "</td>" +
+        "<td>" + (bat === null ? "-" : bat + "%") + "</td>" +
+        "<td>" + fmtTime(t.deleted_ts) + "</td>" +
+        '<td><button class="ghost small" onclick="restoreTrash(' +
+        "'" + t.uid.replace(/'/g, "\\'") + "'" + ')">恢复</button> ' +
+        '<button class="pn-del" onclick="purgeTrash(' +
+        "'" + t.uid.replace(/'/g, "\\'") + "','" + esc(t.name) + "'," + t.snap_count + ')">彻底删除</button></td>' +
+        "</tr>";
+    }).join("");
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="6" style="color:#ef4444">加载失败：' + esc(e.message) + "</td></tr>";
+  }
+}
+
+async function restoreTrash(uid) {
+  if (!confirm("恢复探杆 " + uid + "？\n档案回到总览，数据继续累计。")) return;
+  var resp = await fetch("/api/v1/trash/" + encodeURIComponent(uid) + "/restore",
+    { method: "POST" });
+  var j = await resp.json().catch(function () { return {}; });
+  if (!resp.ok) { alert("恢复失败：" + (j.err || resp.status)); return; }
+  alert("已恢复");
+  loadTrash();
+}
+
+async function purgeTrash(uid, name, cnt) {
+  if (!confirm("彻底删除探杆「" + name + "」(" + uid + ")？\n将清除其全部 " + cnt +
+    " 条历史快照、告警与档案，不可恢复！")) return;
+  if (!confirm("再次确认：此操作不可撤销，确定彻底删除？")) return;
+  var resp = await fetch("/api/v1/trash/" + encodeURIComponent(uid), { method: "DELETE" });
+  var j = await resp.json().catch(function () { return {}; });
+  if (!resp.ok) { alert("删除失败：" + (j.err || resp.status)); return; }
+  alert("已彻底删除（清理 " + j.snap_count + " 条快照）");
+  loadTrash();
+}
+
+document.getElementById("trashRefresh").addEventListener("click", loadTrash);
+document.getElementById("trashEmpty").addEventListener("click", async function () {
+  var list = await apiGet("/api/v1/trash").catch(function () { return []; });
+  if (!list.length) { alert("回收箱为空"); return; }
+  if (!confirm("清空回收箱：将彻底删除 " + list.length + " 个探杆的全部历史数据（不可恢复）！")) return;
+  if (!confirm("再次确认：此操作不可撤销，确定清空？")) return;
+  var resp = await fetch("/api/v1/trash", { method: "DELETE" });
+  var j = await resp.json().catch(function () { return {}; });
+  if (!resp.ok) { alert("清空失败：" + (j.err || resp.status)); return; }
+  alert("已清空（彻底删除 " + j.poles + " 杆、" + j.snap_count + " 条快照）");
+  loadTrash();
+});
+
+loadTrash();
+</script>
+</body>
+</html>

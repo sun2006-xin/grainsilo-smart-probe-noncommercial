@@ -1,0 +1,23 @@
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+.build/
+dist/
+
+# Local station state and credentials
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.env
+.env.*
+!.env.example
+
+# Firmware build outputs (source and release ZIP remain trackable)
+*.elf
+*.map
+*.bin
+*.hex

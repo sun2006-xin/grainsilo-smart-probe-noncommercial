@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>粮仓集成监控中心</title>
+<link rel="icon" type="image/svg+xml" href="/assets/img/grain-mark.svg">
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/warehouse-scene.css">
+</head>
+<body>
+
+<!-- 顶部告警横幅（任一杆超限时显示；声音开关常驻顶栏） -->
+<div id="alertBanner" class="alert-banner hidden">
+  <span id="alertText"></span>
+  <span class="alert-sound-note">提示音可在顶栏单独控制</span>
+</div>
+
+<div class="app-content">
+<!-- 顶栏 -->
+<header class="topbar">
+  <div class="brand-block">
+    <div class="brand-mark" aria-hidden="true"><img src="/assets/img/grain-mark.svg" alt=""></div>
+    <div>
+      <h1>粮仓集成监控中心</h1>
+      <div class="sub">GrainSilo · 本地数据中心</div>
+    </div>
+  </div>
+  <div class="topbar-context" aria-label="当前仓库">
+    <span class="context-label">当前仓库</span>
+    <select id="warehouseSelect" aria-label="选择仓库"><option>1号平房仓（主仓）</option></select>
+    <span class="context-time">数据更新时间 <b id="topDataTime">-</b></span>
+    <span class="live-mark"><i></i>实时数据</span>
+  </div>
+  <nav class="app-nav" aria-label="主导航">
+    <div class="nav-brand">
+      <div class="nav-brand-mark" aria-hidden="true"><img src="/assets/img/grain-mark.svg" alt=""></div>
+      <div><strong>粮仓集成监控中心</strong><small>GrainSilo · 本地数据中心</small></div>
+    </div>
+    <a class="active" data-page="overview" href="/index.html" aria-current="page">仓库总览</a>
+    <a data-page="piles" href="/piles.html">粮堆管理</a>
+    <a data-page="probes" href="/probes.html">探杆管理</a>
+    <a data-page="environment" href="/environment.html">环境监测</a>
+    <a data-page="alerts" href="/alerts.html">告警中心</a>
+    <a data-page="history" href="/db.html">历史数据库</a>
+    <a data-page="crop" href="/crop-models.html">作物模型</a>
+  </nav>
+  <div class="topbar-right">
+    <div class="top-status-line">
+      <span id="stationHealth" class="health-pill pending">中心站连接中</span>
+      <span class="refresh-meta">刷新 <span id="refreshTime">-</span></span>
+    </div>
+    <div class="top-actions">
+      <button class="sound-toggle" id="soundToggle" type="button" aria-pressed="false">提示音：关</button>
+      <button class="ghost" id="dbBtn">打开数据库</button>
+      <button class="primary-soft" id="refreshBtn">刷新数据</button>
+    </div>
+  </div>
+</header>
+
+<!-- 主数据统计条（几个粮堆 / 多大体积 / 几根探杆） -->
+<div class="stats-row">
+  <div class="stat"><span class="stat-icon cold" aria-hidden="true">✣</span><div><div class="v" id="stTemp">-</div><div class="k">仓内温度</div><small>正常范围 10 ~ 25°C</small></div></div>
+  <div class="stat"><span class="stat-icon wet" aria-hidden="true">◌</span><div><div class="v" id="envRhStat">-</div><div class="k">仓内湿度</div><small>正常范围 40 ~ 65%</small></div></div>
+  <div class="stat"><span class="stat-icon sun" aria-hidden="true">☼</span><div><div class="v" id="envLuxStat">-</div><div class="k">仓内光照</div><small>正常范围 0 ~ 50 lx</small></div></div>
+  <div class="stat"><span class="stat-icon flow" aria-hidden="true">⌁</span><div><div class="v" id="stOnline">0</div><div class="k">在线探杆</div><small><span id="stPoles">0</span> 根探杆运行中</small></div></div>
+  <div class="stat"><span class="stat-icon leaf" aria-hidden="true">◒</span><div><div class="v stat-good" id="envHealthStat">环境良好</div><div class="k">通风状态</div><small id="envHealthSub">等待环境数据</small></div></div>
+  <div class="stat stat-compact"><div><div class="v" id="stPiles">0</div><div class="k">粮堆</div></div><div><div class="v" id="stVol">0</div><div class="k">总体积 m³</div></div><div><div class="v" id="stWeight">0</div><div class="k">总粮重 t</div></div><div><div class="v" id="stNodes">0</div><div class="k">节点</div></div></div>
+</div>
+
+<!-- 仓库环境监测（环境传感器 POST /api/v1/env 显示） -->
+<section class="env-strip" id="environment">
+  <div class="section-label"><span class="section-eyebrow">WAREHOUSE HEALTH</span><b>仓内环境</b><span class="section-note">按传感器注册表显示</span></div>
+  <div class="env-item"><span class="env-k">仓内温度</span><span class="env-v" id="envTemp">-</span></div>
+  <div class="env-item"><span class="env-k">仓内湿度</span><span class="env-v" id="envRh">-</span></div>
+  <div class="env-item"><span class="env-k">CO₂</span><span class="env-v" id="envCo2">-</span></div>
+  <div class="env-item"><span class="env-k">光照</span><span class="env-v" id="envLux">-</span></div>
+  <div class="env-item grow"><span class="env-k">上报时间</span><span class="env-v dim" id="envTs">暂无环境数据（传感器上报后显示）</span></div>
+</section>
+
+<section class="actuator-reserve" id="actuators" aria-labelledby="actuatorTitle">
+  <div class="actuator-reserve-head"><div><span class="section-eyebrow">FUTURE ACTUATORS</span><h2 id="actuatorTitle">执行设备接口预留</h2></div><span class="actuator-lock">当前只读 · 未接控制硬件</span></div>
+  <div class="actuator-grid" id="actuatorGrid" aria-live="polite"><div class="actuator-empty">读取设备能力…</div></div>
+</section>
+
+<!-- 主布局：左侧粮堆/探杆/节点三级树 + 中央 3D -->
+<main class="layout" id="overview">
+  <aside class="sidebar" id="piles">
+    <div class="side-head">
+      <h2>粮堆 · 探杆 · 节点</h2>
+      <div class="side-btns">
+        <button class="ghost small" id="whBtn">仓库</button>
+        <button class="ghost small" id="addPileBtn">+ 添加粮堆</button>
+        <button class="ghost small" id="addPoleBtn">+ 添加探杆</button>
+      </div>
+    </div>
+    <div class="type-switch" id="typeSwitch" title="切换粮堆卡片显示指标">
+      <button data-k="temp" class="active">温度</button>
+      <button data-k="rh">湿度</button>
+      <button data-k="bat">电量</button>
+      <button data-k="cnt">杆数</button>
+    </div>
+    <div class="side-summary"><span>监测对象</span><b id="sideObjectCount">0 个粮堆</b><span class="side-summary-dot"></span><span id="sideFreshness">等待采样</span></div>
+    <ul id="pileTree" style="list-style:none"></ul>
+  </aside>
+  <section class="scene-wrap" id="sceneWrap" data-active-view="legacy">
+    <div class="scene-head">
+      <div>
+        <div class="scene-kicker">WAREHOUSE / LIVE DATA</div>
+        <h2>粮仓三维剖面</h2>
+        <p id="thermalMeta">正在读取节点数据…</p>
+      </div>
+      <div class="scene-badges">
+        <span class="scene-badge" id="sceneEvidence">等待证据</span>
+        <span class="scene-badge measured">● 实测探针</span>
+        <span class="scene-badge accent">IDW · 坐标待校验</span>
+      </div>
+    </div>
+    <div class="scene-toolbar" aria-label="热场显示控制">
+      <button class="scene-tool active" data-scene-mode="temp">温度</button>
+      <button class="scene-tool" data-scene-mode="rh">湿度</button>
+      <button class="scene-tool" id="sceneDataView">数据视图</button>
+      <button class="scene-tool active" id="sceneLegacyView">三维场景</button>
+      <button class="scene-tool" id="sceneDemo" aria-pressed="false">模型演示</button>
+      <button class="scene-tool active" id="sceneCut" aria-pressed="true">角切剖面</button>
+      <button class="scene-tool" id="sceneProbeToggle">探杆：显示</button>
+      <button class="scene-tool" id="sceneReset">重置视角</button>
+      <button class="scene-tool" id="sceneFullscreen">全屏</button>
+    </div>
+    <div class="scene-help" id="sceneHelp">拖动旋转 · 滚轮缩放 · 点击查看 · Shift 拖动已校准探杆调整位置</div>
+    <div id="grainDataScene" role="region" aria-label="由配置和实测数据生成的仓房空间视图"></div>
+    <div id="scene3d"></div>
+    <div id="tooltip" class="tooltip hidden"></div>
+  </section>
+  <aside class="forecast-panel" aria-label="温度预测">
+    <div class="pile-detail-head">
+      <div><span class="detail-eyebrow">SELECTED PILE</span><h2 id="detailPileName">粮堆详情</h2></div>
+      <select id="detailPileSelect" aria-label="选择粮堆"><option>暂无粮堆</option></select>
+    </div>
+    <div class="pile-detail-meta">
+      <div><span>粮食品种</span><b id="detailKind">-</b></div>
+      <div><span>堆体体积</span><b id="detailVolume">-</b></div>
+      <div><span>预估重量</span><b id="detailWeight">-</b></div>
+      <div><span>入仓时间</span><b id="detailCreated">-</b></div>
+    </div>
+    <div class="probe-detail-head"><b>探杆测点</b><span id="detailProbeCount">（0 个测点）</span></div>
+    <div class="probe-table-wrap"><table class="probe-table"><thead><tr><th>测点位置</th><th>深度</th><th>温度</th><th>状态</th></tr></thead><tbody id="detailProbeTable"><tr><td colspan="4">等待探杆上报</td></tr></tbody></table></div>
+    <div class="detail-trend-summary"><div><span>当前核心温度</span><b id="detailCoreTemp">-</b></div><div><span>7天后预计</span><b id="detailTrendDelta">-</b></div><div><span>风险提示</span><b id="detailRisk">等待数据</b></div></div>
+    <div class="forecast-kicker">MEASURED → INTERPOLATED → FORECAST</div>
+    <div class="forecast-title-row">
+      <h2>温度场与预测</h2>
+      <span class="forecast-status" id="forecastStatus">等待数据</span>
+    </div>
+    <p class="forecast-sub">探杆是实测点；粮堆内部颜色由相邻探杆 IDW 插值得到。</p>
+
+    <div class="forecast-metrics">
+      <div><span>实测均值</span><b id="fcMean">-</b></div>
+      <div><span>实测范围</span><b id="fcRange">-</b></div>
+      <div><span>实测节点</span><b id="fcSamples">-</b></div>
+      <div><span>插值网格</span><b id="fcField">-</b></div>
+    </div>
+
+    <div class="forecast-section-head">
+      <span>在线测点未来温湿度趋势均值</span>
+      <span class="forecast-unit">探杆周围空气 · 非整堆实测</span>
+    </div>
+    <div class="forecast-list" id="forecastList">
+      <div class="forecast-empty">选择一个粮堆后显示</div>
+    </div>
+
+    <section class="probe-air-forecast" aria-labelledby="probeAirTitle">
+      <div class="forecast-section-head"><span id="probeAirTitle">单节点周围空气温湿度预测</span>
+        <select id="probeForecastSelect" aria-label="选择探杆节点"><option value="">暂无测点</option></select>
+      </div>
+      <p class="probe-air-note" id="probeForecastMeta">分开显示探杆历史趋势、天气辅助预测和 S3 设备预测。天气模型使用本仓逐小时天气与探杆实测配对拟合，仅在数据和留出验证达标后给出数值。</p>
+      <div class="probe-air-sources">
+        <div><b>电脑端历史趋势</b><span id="stationProbeForecast"><span class="forecast-empty">等待选择测点</span></span></div>
+        <div><b>S3 探杆端预测</b><span id="s3ProbeForecast"><span class="forecast-empty">等待选择测点</span></span></div>
+        <div class="probe-weather-model"><b>电脑端天气辅助预测</b><span id="weatherProbeForecast"><span class="forecast-empty">等待逐小时配对数据</span></span></div>
+      </div>
+      <div class="probe-air-risk" id="probeForecastRisk" role="status">预测风险与实测超限分开显示；数据不足或过期不会判为安全。</div>
+    </section>
+
+    <div class="weather-box">
+      <div class="weather-box-title">本仓天气位置与逐小时天气</div>
+      <div class="weather-fields">
+        <label>纬度 <input id="weatherLat" inputmode="decimal" placeholder="如 39.90"></label>
+        <label>经度 <input id="weatherLon" inputmode="decimal" placeholder="如 116.40"></label>
+      </div>
+      <button class="ghost weather-btn" id="weatherLoad">保存位置并更新天气预测</button>
+      <div class="weather-source" id="weatherSource">天气模型是网格天气，不是仓内实测；配对探杆历史并通过留出验证后，才用于天气辅助预测。</div>
+    </div>
+    <div class="forecast-note" id="forecastNote">预测需要有效探杆温度；IDW 与预测均不等同于 CFD 求解。</div>
+  </aside>
+</main>
+
+<!-- 监测趋势（只消费既有预测/测量数据，保持现有 API 不变） -->
+<section class="trend-card" id="trend" aria-labelledby="trendTitle">
+  <div class="trend-tabs" aria-label="数据快捷入口"><button type="button" class="trend-tab active" data-trend-tab="trend" aria-pressed="true" id="trendTitle">历史趋势</button><button type="button" class="trend-tab" data-trend-tab="alerts" aria-pressed="false">告警记录</button><button type="button" class="trend-tab" data-trend-tab="history" aria-pressed="false">历史数据库</button></div>
+  <div class="trend-toolbar"><label>探杆测点 <select id="trendProbeSelect" aria-label="选择探杆节点"><option value="">等待有效测点</option></select></label><div class="trend-controls"><div class="range-pills" role="group" aria-label="选择曲线指标"><button type="button" data-trend-metric="temp" class="active" aria-pressed="true">温度</button><button type="button" data-trend-metric="rh" aria-pressed="false">相对湿度</button></div><div class="range-pills" role="group" aria-label="选择历史范围"><button type="button" data-hours="24" aria-pressed="false">近24小时</button><button type="button" data-hours="168" class="active" aria-pressed="true">近7天</button><button type="button" data-hours="720" aria-pressed="false">近30天</button></div></div><span class="trend-range" id="trendRangeStatus" aria-live="polite">等待真实历史数据</span></div>
+  <div class="trend-body"><div class="trend-chart" id="trendPlot" aria-live="polite"><div class="trend-empty">等待真实采样后显示历史曲线</div></div><div class="trend-note"><span class="note-icon">i</span><b>数据说明</b><p>曲线来自所选探杆节点的历史实测上报；温度与相对湿度可切换，时间范围可选 24 小时、7 天或 30 天。</p><p>右侧预测区单独展示趋势外推；历史曲线不是预测结果，附近空气趋势也不等同于整堆粮温或粮食含水率。</p></div></div>
+</section>
+
+<!-- 告警记录 -->
+<section class="card alerts-card" id="alerts">
+  <div class="section-heading"><div><span class="section-eyebrow">EVENT LOG</span><h2>告警记录</h2></div><a href="db.html" class="text-link">查看历史数据库 →</a></div>
+  <div class="alert-table-wrap" role="region" aria-label="告警记录表格，可横向滚动" tabindex="0">
+    <table>
+      <thead><tr><th>时间</th><th>探杆</th><th>节点</th><th>类型</th><th>超限值</th><th>阈值</th><th>状态</th></tr></thead>
+      <tbody id="alertTable"><tr><td colspan="7">加载中…</td></tr></tbody>
+    </table>
+  </div>
+</section>
+</div>
+
+<!-- 添加粮堆弹窗 -->
+<div id="modalMask" class="modal-mask hidden">
+  <div class="modal">
+    <h3 id="modalTitle">添加粮堆</h3>
+    <form id="pileForm" class="pile-form">
+      <div class="frow">
+        <label>名称</label><input id="pfName" type="text" placeholder="如 1号粮堆">
+        <label>吨数 t</label><input id="pfWeight" type="number" step="1" min="0" placeholder="150">
+      </div>
+      <div class="frow">
+        <label>容重 kg/m³</label><input id="pfDensity" type="number" step="10" min="1" value="750">
+        <label>长 m</label><input id="pfL" type="number" step="0.5" value="20">
+        <label>宽 m</label><input id="pfW" type="number" step="0.5" value="10">
+      </div>
+      <div class="frow">
+        <label>绑定探杆</label>
+        <div id="pfPoles" class="pole-check"></div>
+      </div>
+      <div class="calc-note" id="calcNote"></div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="modalCancel">取消</button>
+        <button type="submit" id="modalSave">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 仓库设置弹窗（粮仓大小，影响 3D 场景与粮堆自动布局） -->
+<div id="whMask" class="modal-mask hidden">
+  <div class="modal">
+    <h3>仓库设置</h3>
+    <form id="whForm" class="pile-form">
+      <div class="frow">
+        <label>仓长 m</label><input id="whL" type="number" step="0.5" min="1">
+        <label>仓宽 m</label><input id="whW" type="number" step="0.5" min="1">
+        <label>仓高 m</label><input id="whH" type="number" step="0.5" min="1">
+      </div>
+      <div class="calc-note">保存后 3D 场景按新尺寸重建，全部粮堆由算法自动重新放置（互不重叠）。</div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="whCancel">取消</button>
+        <button type="submit" id="whSave">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 探杆设置/添加弹窗（单击 3D 探杆 -> 设置位置名称；侧栏按钮 -> 手动添加） -->
+<div id="poleMask" class="modal-mask hidden">
+  <div class="modal">
+    <h3 id="poleModalTitle">探杆设置</h3>
+    <form id="poleForm" class="pile-form">
+      <div class="frow" id="poleUidRow">
+        <label>杆 ID（UID）</label>
+        <input id="poUid" type="text" placeholder="如 80:01:02:03:04:05:06:07">
+      </div>
+      <div class="frow">
+        <label>名称</label><input id="poName" type="text" placeholder="如 1号粮堆中心杆">
+        <label>所属粮堆</label>
+        <select id="poPile"><option value="">（不绑定）</option></select>
+      </div>
+      <div class="frow">
+        <label>X 位置 m</label><input id="poX" type="number" step="0.5" min="0">
+        <label>Z 位置 m</label><input id="poZ" type="number" step="0.5" min="0">
+        <label>间距 m</label><input id="poSpacing" type="number" step="0.1" min="0.1" value="0.5">
+      </div>
+      <div class="calc-note">坐标范围：X 0~仓长、Z 0~仓宽（自动约束在仓内）；也可以在 3D 里直接拖动探杆改位置。间距 = 节点沿杆的间隔（米）。</div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="poleCancel">取消</button>
+        <button type="submit" id="poleSave">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/assets/vendor/three.min.js"></script>
+<script src="/assets/vendor/OrbitControls.js"></script>
+<script src="/assets/vendor/GLTFLoader.js"></script>
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/warehouse-geometry.js"></script>
+<script src="/assets/js/warehouse-scene.js"></script>
+<script src="/assets/js/grain-data-scene.js"></script>
+<script>
+/* ============ 总览页逻辑：统计 / 粮堆树 / 3D / 弹窗 / 15s 轮询 ============ */
+var soundOn = readAlertSoundPreference();
+var lastAlertSoundSignature = "";
+var typeKey = "temp";                 // 类型选择器：temp/rh/bat/cnt
+var piles = [];                       // 粮堆列表（后端 /api/v1/piles）
+var poles = [];                       // 杆列表
+var selectedPileId = null;            // 选中粮堆
+var selectedUid = null;               // 选中杆
+var editingPileId = null;             // 弹窗编辑的粮堆 id（null=新建）
+var allPoles = [];                    // 供弹窗绑定的全部杆（含未绑定）
+var latestEnv = null;                 // 当前环境摘要（只用于现有 UI 展示）
+var trendHours = 168;
+var trendMetric = "temp";
+var selectedTrendKey = "";
+var trendRequestId = 0;
+var trendLastLoad = 0;
+var sceneMetric = "temp";
+var sceneProbesVisible = true;
+var weatherCoords = { lat: "", lon: "" };
+
+function readAlertSoundPreference() {
+  try { return localStorage.getItem("grainsilo.alertSound.enabled") === "true"; }
+  catch (e) { return false; }
+}
+
+function persistAlertSoundPreference(enabled) {
+  try { localStorage.setItem("grainsilo.alertSound.enabled", enabled ? "true" : "false"); }
+  catch (e) { /* 存储不可用时本标签页仍可静音 */ }
+}
+
+function updateSoundToggle() {
+  var toggle = document.getElementById("soundToggle");
+  if (!toggle) return;
+  toggle.textContent = soundOn ? "提示音：开" : "提示音：关";
+  toggle.setAttribute("aria-pressed", soundOn ? "true" : "false");
+  toggle.title = soundOn ? "告警提示音已开启，点击关闭" : "告警提示音已关闭，点击开启";
+}
+
+function stopAlertSound() {
+  /* 声音只在新告警首次出现时播放，不存在重复播放定时器。 */
+}
+
+function setAlertSoundEnabled(enabled) {
+  soundOn = Boolean(enabled);
+  persistAlertSoundPreference(soundOn);
+  updateSoundToggle();
+  if (!soundOn) stopAlertSound();
+  else updateBanner();
+}
+
+window.addEventListener("storage", function (event) {
+  if (event.key !== "grainsilo.alertSound.enabled") return;
+  soundOn = event.newValue === "true";
+  updateSoundToggle();
+  if (!soundOn) stopAlertSound();
+  else updateBanner();
+});
+
+function setStationHealth(kind, text) {
+  var el = document.getElementById("stationHealth");
+  if (!el) return;
+  el.className = "health-pill " + kind;
+  el.textContent = text;
+}
+
+function ageText(ts) {
+  if (!ts) return "等待采样";
+  var age = Math.max(0, Math.floor(Date.now() / 1000 - Number(ts)));
+  if (age < 60) return age + " 秒前采样";
+  if (age < 3600) return Math.floor(age / 60) + " 分钟前采样";
+  return Math.floor(age / 3600) + " 小时前采样";
+}
+
+function updateSideStatus() {
+  var latest = 0;
+  poles.forEach(function (p) { latest = Math.max(latest, Number(p.last_ts || 0)); });
+  var count = document.getElementById("sideObjectCount");
+  var fresh = document.getElementById("sideFreshness");
+  if (count) count.textContent = piles.length + " 个粮堆";
+  if (fresh) fresh.textContent = ageText(latest);
+}
+
+document.getElementById("weatherLat").value = weatherCoords.lat;
+document.getElementById("weatherLon").value = weatherCoords.lon;
+
+function beep() {
+  if (!soundOn) return;
+  try {
+    var ctx = beep.ctx || (beep.ctx = new (window.AudioContext || window.webkitAudioContext)());
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880; g.gain.value = 0.12;
+    o.start(); o.stop(ctx.currentTime + 0.35);
+  } catch (e) { /* 无音频设备时静默 */ }
+}
+
+/* ---------- 电量条 ---------- */
+function batHtml(p) {
+  if (p.bat_pct === null || p.bat_pct === undefined) return "";
+  var pct = Math.round(p.bat_pct);
+  var cls = pct <= 20 ? "crit" : (pct <= 50 ? "low" : "");
+  return '<span class="bat-bar"><span class="bat-fill ' + cls +
+    '" style="width:' + Math.max(pct, 4) + '%"></span></span>' +
+    '<span class="bat-text">' + pct + "%</span>";
+}
+
+/* ---------- 统计条 ---------- */
+function renderStats() {
+  var vol = 0, wt = 0, online = 0, nodes = 0, temps = [];
+  piles.forEach(function (p) { vol += p.volume || 0; wt += p.weight_kg || 0; });
+  poles.forEach(function (p) {
+    if (p.status === 1) online++;
+    var ns = p.node_states || [];
+    nodes += ns.length;
+    var snap = p.snapshot;
+    if (snap && snap.nodes) snap.nodes.forEach(function (n) {
+      if (n.temp !== null && n.temp !== undefined) temps.push(n.temp);
+    });
+  });
+  document.getElementById("stPiles").textContent = piles.length;
+  document.getElementById("stVol").textContent = vol.toFixed(0);
+  document.getElementById("stWeight").textContent = (wt / 1000).toFixed(1);
+  document.getElementById("stPoles").textContent = poles.length;
+  document.getElementById("stOnline").textContent = online + "/" + poles.length;
+  document.getElementById("stNodes").textContent = nodes;
+  var avgTemp = temps.length ?
+    (temps.reduce(function (a, b) { return a + b; }, 0) / temps.length).toFixed(1) + "°C" : "-";
+  document.getElementById("stTemp").textContent = latestEnv && latestEnv.temp !== undefined && latestEnv.temp !== null
+    ? Number(latestEnv.temp).toFixed(1) + "°C" : avgTemp;
+  document.getElementById("stNodes").textContent = nodes;
+  updateSideStatus();
+}
+
+/* ---------- 左侧三级树：粮堆 -> 探杆 -> 节点 ---------- */
+function poleAvgTemp(p) {
+  var snap = p.snapshot;
+  if (!snap || !snap.nodes || !snap.nodes.length) return null;
+  var ts = snap.nodes.map(function (n) { return n.temp; })
+    .filter(function (v) { return v !== null && v !== undefined; });
+  return ts.length ? ts.reduce(function (a, b) { return a + b; }, 0) / ts.length : null;
+}
+
+function poleAvgRh(p) {
+  var snap = p.snapshot;
+  if (!snap || !snap.nodes || !snap.nodes.length) return null;
+  var rs = snap.nodes.map(function (n) { return n.rh; })
+    .filter(function (v) { return v !== null && v !== undefined; });
+  return rs.length ? rs.reduce(function (a, b) { return a + b; }, 0) / rs.length : null;
+}
+
+function nodeRowsHtml(p) {
+  var snap = p.snapshot;
+  if (!snap || !snap.nodes || !snap.nodes.length) return "";
+  var out = snap.nodes.map(function (nd, i) {
+    var addr = nd.addr || (i + 1);
+    var lost = p.node_states && p.node_states.length
+      ? (p.node_states.filter(function (s) { return s.addr === addr; })[0] || {}).online === false
+      : false;
+    return '<div class="node-row' + (lost ? " off" : "") + '">' +
+      "N" + addr + "　" +
+      (nd.temp === null || nd.temp === undefined ? "-" : nd.temp.toFixed(1) + "°C") +
+      "　" + (nd.rh === null || nd.rh === undefined ? "-" : nd.rh.toFixed(0) + "%") +
+      (lost ? ' <span class="badge off">失联</span>' : "") +
+      '<a class="node-detail" href="pole.html?uid=' + encodeURIComponent(p.uid) + '">详情 →</a>' +
+      "</div>";
+  }).join("");
+  return '<div class="node-list">' + out + "</div>";
+}
+
+function poleMetricHtml(p) {
+  /* 按类型选择器显示指标 */
+  if (typeKey === "rh") {
+    var rh = poleAvgRh(p);
+    return rh === null ? "<span class='dim'>-</span>" : rh.toFixed(0) + "%";
+  }
+  if (typeKey === "bat") return batHtml(p) || "<span class='dim'>-</span>";
+  if (typeKey === "cnt") {
+    var ns = p.node_states || [];
+    var on = ns.filter(function (s) { return s.online; }).length;
+    return on + "/" + (ns.length || "-") + " 节点";
+  }
+  var t = poleAvgTemp(p);
+  return t === null ? "<span class='dim'>-</span>" : t.toFixed(1) + "°C";
+}
+
+function renderPileTree() {
+  var ul = document.getElementById("pileTree");
+  ul.innerHTML = "";
+  if (!piles.length) {
+    ul.innerHTML = '<li class="empty">暂无粮堆。<br>点击上方"添加粮堆"，输入吨数自动算体积。<br>' +
+      '<span class="dim">（旧版全局粮重已自动迁移为 1 号粮堆）</span></li>';
+    return;
+  }
+  piles.forEach(function (pl) {
+    var sel = pl.id === selectedPileId;
+    var li = document.createElement("li");
+    li.className = "pile-card" + (sel ? " sel" : "");
+    var meta = pl.pole_count + " 杆 · " + pl.weight_kg.toFixed(0) + " kg";
+    if (pl.volume) meta = pl.volume.toFixed(0) + " m³ · 高 " + pl.height.toFixed(2) + " m · " + pl.pole_count + " 杆";
+    li.innerHTML =
+      '<div class="pile-head" data-id="' + pl.id + '">' +
+        '<div class="pile-name">' + esc(pl.name) +
+          (sel ? '<span class="badge on" style="margin-left:6px">已选</span>' : "") +
+        "</div>" +
+        '<div class="pile-meta">' + meta + "</div>" +
+        '<div class="pile-actions">' +
+          '<button class="ghost small" data-act="config" data-id="' + pl.id + '">配置</button>' +
+          '<button class="ghost small" data-act="del" data-id="' + pl.id + '">删除</button>' +
+        "</div>" +
+      "</div>";
+    /* 绑定探杆（二级） */
+    if (pl.poles && pl.poles.length) {
+      var pwrap = document.createElement("div");
+      pwrap.className = "pile-poles";
+      pl.poles.forEach(function (po) {
+        var p = null;
+        for (var i = 0; i < poles.length; i++) if (poles[i].uid === po.uid) { p = poles[i]; break; }
+        if (!p) return;
+        var psel = p.uid === selectedUid;
+        var pdiv = document.createElement("div");
+        pdiv.className = "pole-node" + (psel ? " sel" : "") + (p.status ? "" : " offline");
+        pdiv.innerHTML =
+          '<div class="pn-row" data-uid="' + p.uid + '">' +
+            '<span class="pn-name">' + esc(p.name) + "</span>" +
+            '<span class="pn-metric">' + poleMetricHtml(p) + "</span>" +
+          "</div>" +
+          '<div class="pn-sub">' + esc(p.uid) + " · " + statusBadge(p) + "</div>" +
+          (psel ? nodeRowsHtml(p) : "");
+        pdiv.querySelector(".pn-row").addEventListener("click", function (e) {
+          e.stopPropagation();
+          togglePoleSelect(p.uid);
+        });
+        pdiv.querySelectorAll(".node-row .node-detail").forEach(function (a) {
+          a.addEventListener("click", function (e) { e.stopPropagation(); });
+        });
+        pwrap.appendChild(pdiv);
+      });
+      li.appendChild(pwrap);
+    } else {
+      li.innerHTML += '<div class="pile-empty">未绑定探杆 —— 点"配置"绑定</div>';
+    }
+    /* 粮堆添加历史（数据添加历史） */
+    li.innerHTML += '<div class="pile-history">建档 ' + fmtShort(pl.created_ts) +
+      (pl.updated_ts && pl.updated_ts !== pl.created_ts
+        ? " · 更新 " + fmtShort(pl.updated_ts) : "") + "</div>";
+    ul.appendChild(li);
+  });
+  /* 绑定事件（事件委托） */
+  ul.querySelectorAll(".pile-head").forEach(function (h) {
+    h.addEventListener("click", function () {
+      selectedPileId = parseInt(h.dataset.id, 10);
+      selectedUid = null;
+      Scene3D.setSelectedPile(selectedPileId);
+      Scene3D.setSelectedPole(null);
+      renderPileTree();
+      loadHeatmap();
+      renderDataScene();
+    });
+  });
+  ul.querySelectorAll('[data-act="config"]').forEach(function (b) {
+    b.addEventListener("click", function (e) {
+      e.stopPropagation();
+      selectedPileId = parseInt(b.dataset.id, 10);
+      Scene3D.setSelectedPile(selectedPileId);
+      openPileModal(selectedPileId);
+      renderDataScene();
+    });
+  });
+  ul.querySelectorAll('[data-act="del"]').forEach(function (b) {
+    b.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var id = parseInt(b.dataset.id, 10);
+      if (!confirm("删除粮堆 " + id + "？其绑定探杆会解绑（数据不删除）。")) return;
+      fetch("/api/v1/piles/" + id, { method: "DELETE" })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          if (selectedPileId === id) { selectedPileId = null; Scene3D.setSelectedPile(null); }
+          refresh();
+        });
+    });
+  });
+}
+
+function togglePoleSelect(uid) {
+  selectedUid = (selectedUid === uid) ? null : uid;
+  Scene3D.setSelectedPole(selectedUid);
+  renderPileTree();
+}
+
+/* ---------- 仓库环境监测卡片 ---------- */
+function loadEnv() {
+  apiGet("/api/v1/env/latest").then(function (e) {
+    if (!e || !e.data) {
+      latestEnv = null;
+      document.getElementById("envTemp").textContent = "-";
+      document.getElementById("envRh").textContent = "-";
+      document.getElementById("envCo2").textContent = "-";
+      document.getElementById("envLux").textContent = "-";
+      document.getElementById("envTs").textContent = "暂无环境数据（传感器上报后显示）";
+      document.getElementById("envRhStat").textContent = "-";
+      document.getElementById("envLuxStat").textContent = "-";
+      document.getElementById("envHealthStat").textContent = "等待数据";
+      document.getElementById("envHealthSub").textContent = "暂无环境数据";
+      renderStats();
+      return;
+    }
+    var d = e.data || {};
+    latestEnv = d;
+    var fmt = function (v, unit) {
+      return (v === undefined || v === null || v === "") ? "-" : v + unit;
+    };
+    document.getElementById("envTemp").textContent = fmt(d.temp, "°C");
+    document.getElementById("envRh").textContent = fmt(d.rh, "%");
+    document.getElementById("envCo2").textContent = fmt(d.co2, " ppm");
+    document.getElementById("envLux").textContent = fmt(d.lux, " lx");
+    document.getElementById("envTs").textContent = "上报于 " + fmtTime(e.ts);
+    document.getElementById("envRhStat").textContent = fmt(d.rh, "%RH");
+    document.getElementById("envLuxStat").textContent = fmt(d.lux, " lx");
+    document.getElementById("envHealthStat").textContent = "环境良好";
+    document.getElementById("envHealthSub").textContent = e.ts ? "各项指标正常" : "等待环境数据";
+    renderStats();
+  }).catch(function () {
+    latestEnv = null;
+    document.getElementById("envTs").textContent = "暂无环境数据（传感器上报后显示）";
+    document.getElementById("envHealthStat").textContent = "连接异常";
+    document.getElementById("envHealthSub").textContent = "请检查环境传感器";
+    renderStats();
+  });
+}
+
+function selectedPileObject() {
+  for (var i = 0; i < piles.length; i++) if (String(piles[i].id) === String(selectedPileId)) return piles[i];
+  return null;
+}
+
+function renderPileDetail() {
+  var pl = selectedPileObject();
+  var select = document.getElementById("detailPileSelect");
+  if (select) {
+    select.innerHTML = piles.length ? piles.map(function (p) {
+      return '<option value="' + p.id + '">' + esc(p.name || (p.id + "号粮堆")) + '</option>';
+    }).join("") : '<option value="">暂无粮堆</option>';
+    if (pl) select.value = String(pl.id);
+  }
+  var text = function (id, value) { var el = document.getElementById(id); if (el) el.textContent = value; };
+  if (!pl) {
+    text("detailPileName", "粮堆详情"); text("detailKind", "-"); text("detailVolume", "-");
+    text("detailWeight", "-"); text("detailCreated", "-"); text("detailProbeCount", "（0 个测点）");
+    text("detailCoreTemp", "-"); text("detailRisk", "等待数据");
+    var empty = document.getElementById("detailProbeTable");
+    if (empty) empty.innerHTML = '<tr><td colspan="4">等待探杆上报</td></tr>';
+    var forecastEmpty = document.getElementById("probeForecastSelect");
+    if (forecastEmpty) forecastEmpty.innerHTML = '<option value="">暂无测点</option>';
+    renderProbeForecastUnavailable("选择一个粮堆或等待探杆节点上报。");
+    return;
+  }
+  text("detailPileName", pl.name || (pl.id + "号粮堆"));
+  text("detailKind", pl.kind || pl.grain_type || "稻谷");
+  text("detailVolume", pl.volume ? Number(pl.volume).toFixed(0) + " m³" : "-");
+  text("detailWeight", pl.weight_kg ? (Number(pl.weight_kg) / 1000).toFixed(0) + " 吨" : "-");
+  text("detailCreated", pl.created_ts ? fmtShort(pl.created_ts) : "-");
+
+  var rows = [], measured = [];
+  (pl.poles || []).forEach(function (bp) {
+    var po = poles.filter(function (p) { return p.uid === bp.uid; })[0];
+    var nodes = po && po.snapshot && po.snapshot.nodes ? po.snapshot.nodes : [];
+    if (!nodes.length) {
+      rows.push('<tr><td>' + esc(po ? po.name : bp.uid) + '</td><td>-</td><td>-</td><td><span class="mini-status off">等待</span></td></tr>');
+      return;
+    }
+    nodes.forEach(function (nd, idx) {
+      var temp = nd.temp === null || nd.temp === undefined ? null : Number(nd.temp);
+      if (temp !== null && isFinite(temp)) measured.push(temp);
+      var depth = nd.position_validated === true && nd.depth_m !== null && nd.depth_m !== undefined && isFinite(Number(nd.depth_m)) ? Number(nd.depth_m).toFixed(1) + ' m' : '待校准';
+      var online = !po || po.status === 1;
+      rows.push('<tr><td title="' + esc(bp.uid) + '">地址 ' + esc(nd.addr) + '</td><td>' + depth + '</td><td>' + (temp === null ? '-' : temp.toFixed(1) + '°C') + '</td><td><span class="mini-status ' + (online ? 'on' : 'off') + '">' + (online ? '正常' : '离线') + '</span></td></tr>');
+    });
+  });
+  text("detailProbeCount", "（" + rows.length + " 个测点）");
+  var table = document.getElementById("detailProbeTable");
+  if (table) table.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4">暂无绑定探杆</td></tr>';
+  text("detailCoreTemp", measured.length ? (measured.reduce(function (a, b) { return a + b; }, 0) / measured.length).toFixed(1) + "°C" : "-");
+  {
+    var forecastOptions = [];
+    (pl.poles || []).forEach(function (bp) {
+      var po = poles.filter(function (p) { return p.uid === bp.uid; })[0];
+      var ns = po && po.snapshot && po.snapshot.nodes ? po.snapshot.nodes : [];
+      ns.forEach(function (nd, idx) {
+        var addr = nd.addr || (idx + 1);
+        forecastOptions.push('<option value="' + esc(bp.uid) + ':' + addr + '">' +
+          esc((po && po.name) || bp.uid) + ' · ' + addr + '</option>');
+      });
+    });
+    var forecastSelect = document.getElementById("probeForecastSelect");
+    var previousForecastSelection = forecastSelect.value;
+    forecastSelect.innerHTML = forecastOptions.length ? forecastOptions.join("") : '<option value="">暂无测点</option>';
+    if (forecastOptions.length && Array.from(forecastSelect.options).some(function (o) {
+      return o.value === previousForecastSelection;
+    })) forecastSelect.value = previousForecastSelection;
+  }
+}
+
+function renderProbeForecastUnavailable(message) {
+  document.getElementById("stationProbeForecast").innerHTML = '<span class="forecast-empty">' + esc(message) + '</span>';
+  document.getElementById("s3ProbeForecast").innerHTML = '<span class="forecast-empty">' + esc(message) + '</span>';
+  document.getElementById("weatherProbeForecast").innerHTML = '<span class="forecast-empty">' + esc(message) + '</span>';
+  document.getElementById("probeForecastRisk").textContent = "数据不足或过期时不作安全判断。";
+  document.getElementById("probeForecastRisk").classList.remove("risk");
+}
+
+function renderProbeForecastSource(hostId, prediction, sourceName) {
+  var host = document.getElementById(hostId);
+  if (!prediction || prediction.status !== "ready") {
+    var status = prediction && prediction.status === "stale" ? "最新样本已过期" : "模型预热中";
+    var count = prediction ? Number(prediction.sample_count || 0) : 0;
+    var span = prediction ? Number(prediction.span_seconds || 0) : 0;
+    host.innerHTML = '<span class="forecast-empty">' + sourceName + " · " + status +
+      "（" + count + " 个样本 / " + span + " 秒）；需至少 6 个样本覆盖 5 分钟</span>";
+    return;
+  }
+  var rows = prediction.forecast || [];
+  host.innerHTML = rows.map(function (point) {
+    return '<span class="probe-air-point"><small>+' + Number(point.hour) + ' 小时</small><b>' +
+      Number(point.temperature_c).toFixed(1) + ' °C</b><em>' +
+      Number(point.rh_pct).toFixed(1) + ' %RH</em></span>';
+  }).join("") || '<span class="forecast-empty">预测点不可用</span>';
+}
+
+function renderWeatherProbeForecast(prediction) {
+  var host = document.getElementById("weatherProbeForecast");
+  if (!prediction || prediction.status !== "ready") {
+    var temp = prediction && prediction.temperature_calibration || {};
+    var vapor = prediction && prediction.vapor_pressure_calibration || {};
+    var count = Math.min(Number(temp.sample_count || 0), Number(vapor.sample_count || 0));
+    var status = prediction && prediction.status === "not_validated" ? "留出验证未通过" :
+      prediction && prediction.status === "stale" ? "最新探杆读数已过期" :
+      prediction && prediction.status === "not_configured" ? "尚未配置本仓天气位置" :
+      prediction && prediction.status === "unavailable" ? "天气服务暂不可用" : "模型预热中";
+    host.innerHTML = '<span class="forecast-empty">天气辅助预测 · ' + status +
+      '（温度 ' + Number(temp.sample_count || 0) + '/72，水汽 ' +
+      Number(vapor.sample_count || 0) + '/72 个有效逐小时转移）</span>';
+    return;
+  }
+  var points = (prediction.forecast || []).filter(function (point) {
+    return Number.isFinite(Number(point.hour)) &&
+      Number.isFinite(Number(point.temperature_c)) &&
+      Number.isFinite(Number(point.rh_pct));
+  });
+  if (!points.length) {
+    host.innerHTML = '<span class="forecast-empty">模型已验证，但未来天气小时数据不完整，暂不外推。</span>';
+    return;
+  }
+  host.innerHTML = points.map(function (point) {
+    return '<span class="probe-air-point"><small>+' + Number(point.hour) + ' 小时</small><b>' +
+      Number(point.temperature_c).toFixed(1) + ' °C</b><em>' +
+      Number(point.rh_pct).toFixed(1) + ' %RH</em></span>';
+  }).join("") + '<small class="probe-weather-meta">探杆周围空气估算 · 天气网格输入 · 非整堆实测</small>';
+}
+
+function loadProbeForecast() {
+  var select = document.getElementById("probeForecastSelect");
+  var value = select && select.value ? select.value : "";
+  if (!value || value.indexOf(":") < 1) {
+    renderProbeForecastUnavailable("当前粮堆没有可选择的有效探杆节点。");
+    return;
+  }
+  var parts = value.split(":");
+  apiGet("/api/v1/probe-forecast?uid=" + encodeURIComponent(parts[0]) +
+    "&addr=" + encodeURIComponent(parts.slice(1).join(":"))).then(function (data) {
+      renderProbeForecastSource("stationProbeForecast", data.station_prediction, "电脑端");
+      renderProbeForecastSource("s3ProbeForecast", data.s3_prediction ? {
+        status: data.s3_prediction.status,
+        sample_count: data.s3_prediction.sample_count,
+        span_seconds: data.s3_prediction.span_s,
+        forecast: (data.s3_prediction.points || []).map(function (point) {
+          return {hour: point.hour, temperature_c: point.temp, rh_pct: point.rh};
+        })
+      } : null, "S3");
+      renderWeatherProbeForecast(data.weather_prediction);
+      var risk = data.risk || {}, labels = [];
+      if ((risk.measured || []).length) labels.push("实测超限");
+      if ((risk.station_forecast || []).length) labels.push("电脑端预测越限");
+      if ((risk.s3_forecast || []).length) labels.push("S3 预测越限");
+      if ((risk.weather_forecast || []).length) labels.push("天气辅助预测越限");
+      var riskEl = document.getElementById("probeForecastRisk");
+      riskEl.textContent = labels.length ? "需要关注：" + labels.join("；") + "。请同时查看原始实测值。" :
+        (data.station_prediction && data.station_prediction.status === "ready" ?
+          "当前所选节点的实测值及可用预测未触及配置阈值。" : "尚无足够新鲜历史样本，暂不作风险结论。");
+      riskEl.classList.toggle("risk", labels.length > 0);
+    }).catch(function () {
+      renderProbeForecastUnavailable("预测接口暂时不可用；现有测量、热场和历史页面不受影响。");
+    });
+}
+
+function renderForecastSummary(data) {
+  var current = data && data.current && isFinite(Number(data.current.mean_c)) ? Number(data.current.mean_c) : null;
+  var rows = data && data.forecast ? data.forecast : [];
+  var values = current === null ? [] : [current].concat(rows.map(function (r) { return Number(r.temperature_c); }).filter(isFinite));
+  if (values.length < 2) {
+    document.getElementById("detailTrendDelta").textContent = "-";
+    document.getElementById("detailRisk").textContent = "等待数据";
+    return;
+  }
+  var delta = values[values.length - 1] - values[0];
+  var max = Math.max.apply(Math, values);
+  document.getElementById("detailTrendDelta").textContent = (delta >= 0 ? "+" : "") + delta.toFixed(1) + "°C";
+  document.getElementById("detailRisk").textContent = max >= 30 ? "中度风险" : "正常";
+}
+
+function renderForecast(data) {
+  var status = document.getElementById("forecastStatus");
+  var current = data && data.current ? data.current : {};
+  var fmt = function (v) { return v === null || v === undefined ? "-" : Number(v).toFixed(1) + "°C"; };
+  document.getElementById("fcMean").textContent = fmt(current.mean_c);
+  document.getElementById("fcRange").textContent = current.min_c === undefined || current.min_c === null
+    ? "-" : Number(current.min_c).toFixed(1) + " ~ " + Number(current.max_c).toFixed(1) + "°C";
+  document.getElementById("fcSamples").textContent = current.sample_count === undefined ? "-" : current.sample_count;
+  var field = window.__lastHeatmap && window.__lastHeatmap.field;
+  document.getElementById("fcField").textContent = field && field.sample_count
+    ? ((window.__lastHeatmap.points || []).length + " 点") : "-";
+  var method = data && data.method;
+  if (method === "probe_air_history") {
+    status.textContent = "长历史趋势参考";
+    status.className = "forecast-status warn";
+  } else if (method === "warming_up") {
+    status.textContent = "积累有效历史中";
+    status.className = "forecast-status";
+  } else {
+    status.textContent = "等待数据";
+    status.className = "forecast-status";
+  }
+  var list = document.getElementById("forecastList");
+  var rows = data && data.forecast ? data.forecast : [];
+  if (!rows.length) {
+    var emptyForecast = document.createElement("div");
+    emptyForecast.className = "forecast-empty";
+    emptyForecast.textContent = data && data.note ? data.note : "等待有效历史数据";
+    list.replaceChildren(emptyForecast);
+  } else {
+    list.innerHTML = rows.map(function (r) {
+      return '<div class="forecast-row"><span class="forecast-hour">+' + r.hour + 'h</span>' +
+        '<b>' + Number(r.temperature_c).toFixed(1) + '°C</b>' +
+        '<span>' + Number(r.rh_pct).toFixed(1) + '%RH</span>' +
+        '<span class="forecast-weather">' + Number(r.sample_count) + ' 个测点</span></div>';
+    }).join("");
+  }
+  var weather = data && data.weather ? data.weather : {};
+  var weatherReady = weather.status === "ready" || weather.status === "ok";
+  var source = weatherReady ? "天气源：" + esc(weather.source || "Open-Meteo") + " · 坐标 " +
+    Number(weather.latitude).toFixed(2) + ", " + Number(weather.longitude).toFixed(2) :
+    (weather.status === "error" ? "天气源暂时不可用，已保留探杆历史趋势" :
+      weather.status === "not_configured" ? "当前仓库尚未配置天气坐标" : "天气数据等待更新");
+  document.getElementById("weatherSource").textContent = source;
+  document.getElementById("forecastNote").textContent = data && data.note
+    ? data.note : "预测需要长期有效探杆温湿度；单节点不代表整堆，非物理场求解。";
+  renderForecastSummary(data);
+}
+
+function renderHistoryPlot(samples) {
+  var host = document.getElementById("trendPlot");
+  var status = document.getElementById("trendRangeStatus");
+  var key = document.getElementById("trendProbeSelect").value.split("|");
+  var addr = Number(key[1]);
+  var field = trendMetric === "rh" ? "rh" : "temp";
+  var unit = trendMetric === "rh" ? "%RH" : "°C";
+  var metricName = trendMetric === "rh" ? "相对湿度" : "温度";
+  var points = [];
+  (Array.isArray(samples) ? samples : []).forEach(function (sample) {
+    var node = (sample.nodes || []).find(function (item) { return Number(item.addr) === addr; });
+    var rawValue = node ? node[field] : null;
+    var value = rawValue === null || rawValue === undefined ? NaN : Number(rawValue);
+    var ts = Number(sample.ts);
+    if (isFinite(value) && isFinite(ts) && ts > 0) points.push({ ts: ts, value: value });
+  });
+  points.sort(function (a, b) { return a.ts - b.ts; });
+  if (!points.length) {
+    host.innerHTML = '<div class="trend-empty">所选时段暂无有效' + metricName + '样本；收到探杆上报后会显示真实历史曲线。</div>';
+    status.textContent = "暂无历史样本";
+    return;
+  }
+  var min = Math.min.apply(Math, points.map(function (p) { return p.value; }));
+  var max = Math.max.apply(Math, points.map(function (p) { return p.value; }));
+  var pad = Math.max((max - min) * 0.12, trendMetric === "rh" ? 1 : 0.4);
+  var lo = min - pad, hi = max + pad, span = hi - lo;
+  var x0 = 54, x1 = 732, y0 = 22, y1 = 142;
+  var t0 = points[0].ts, t1 = points[points.length - 1].ts;
+  var timeSpan = Math.max(t1 - t0, 1);
+  var coords = points.map(function (p, index) {
+    var x = points.length === 1 ? (x0 + x1) / 2 : x0 + (p.ts - t0) / timeSpan * (x1 - x0);
+    var y = y1 - (p.value - lo) / span * (y1 - y0);
+    return { x: x, y: y, point: p };
+  });
+  var line = coords.map(function (p) { return p.x.toFixed(1) + "," + p.y.toFixed(1); }).join(" ");
+  var stroke = trendMetric === "rh" ? "#2586a6" : "#168d83";
+  var ticks = [0, 1, 2].map(function (i) {
+    var value = hi - span * i / 2, y = y0 + (y1 - y0) * i / 2;
+    return '<line x1="' + x0 + '" y1="' + y.toFixed(1) + '" x2="' + x1 + '" y2="' + y.toFixed(1) + '"/><text x="8" y="' + (y + 4).toFixed(1) + '">' + value.toFixed(1) + '</text>';
+  }).join("");
+  var startLabel = new Date(t0 * 1000).toLocaleString(), endLabel = new Date(t1 * 1000).toLocaleString();
+  var markers = coords.length <= 72 ? coords.map(function (p) {
+    return '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="3.2" fill="#fff" stroke="' + stroke + '" stroke-width="1.8"><title>' + esc(fmtTime(p.point.ts) + " · " + p.point.value.toFixed(2) + " " + unit) + '</title></circle>';
+  }).join("") : "";
+  host.innerHTML = '<svg viewBox="0 0 760 180" role="img" aria-label="' + metricName + '历史实测趋势，' + points.length + ' 个样本"><g class="chart-grid">' + ticks + '</g><polyline points="' + line + '" fill="none" stroke="' + stroke + '" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>' + markers + '<text x="' + x0 + '" y="169">' + esc(startLabel) + '</text><text x="' + x1 + '" y="169" text-anchor="end">' + esc(endLabel) + '</text><text x="746" y="18" text-anchor="end">' + unit + '</text></svg>';
+  status.textContent = points.length + " 个历史样本 · " + metricName;
+}
+
+function trendNodeAddresses(pole) {
+  var states = Array.isArray(pole.node_states) ? pole.node_states : [];
+  var snapshotNodes = pole.snapshot && Array.isArray(pole.snapshot.nodes) ? pole.snapshot.nodes : [];
+  var addresses = states.map(function (node) { return Number(node.addr); });
+  snapshotNodes.forEach(function (node) { addresses.push(Number(node.addr)); });
+  return addresses.filter(function (addr, index, list) { return isFinite(addr) && list.indexOf(addr) === index; }).sort(function (a, b) { return a - b; });
+}
+
+function refreshTrendOptions() {
+  var select = document.getElementById("trendProbeSelect");
+  var previous = select.value || selectedTrendKey;
+  var options = [];
+  poles.forEach(function (pole) {
+    var states = Array.isArray(pole.node_states) ? pole.node_states : [];
+    trendNodeAddresses(pole).forEach(function (addr) {
+      var state = states.find(function (node) { return Number(node.addr) === addr; });
+      options.push({ value: String(pole.uid) + "|" + addr, label: String(pole.name || pole.uid) + " · 节点 " + addr + (state && !state.online ? "（离线）" : "") });
+    });
+  });
+  select.replaceChildren();
+  if (!options.length) {
+    trendRequestId++;
+    var empty = document.createElement("option"); empty.value = ""; empty.textContent = "暂无有效测点"; select.appendChild(empty); select.disabled = true;
+    selectedTrendKey = "";
+    document.getElementById("trendPlot").innerHTML = '<div class="trend-empty">尚无可查询的探杆节点；首次有效上报后会自动列出。</div>';
+    document.getElementById("trendRangeStatus").textContent = "等待真实历史数据";
+    return;
+  }
+  options.forEach(function (item) { var option = document.createElement("option"); option.value = item.value; option.textContent = item.label; select.appendChild(option); });
+  select.disabled = false;
+  select.value = options.some(function (item) { return item.value === previous; }) ? previous : options[0].value;
+  var changed = select.value !== selectedTrendKey;
+  selectedTrendKey = select.value;
+  if (changed || !trendLastLoad) loadTrendHistory();
+}
+
+async function loadTrendHistory() {
+  var requestId = ++trendRequestId;
+  var select = document.getElementById("trendProbeSelect");
+  var key = select.value || "";
+  selectedTrendKey = key;
+  trendLastLoad = Date.now();
+  if (!key) return;
+  var parts = key.split("|");
+  if (parts.length !== 2 || !isFinite(Number(parts[1]))) return;
+  document.getElementById("trendRangeStatus").textContent = "读取历史数据…";
+  try {
+    var data = await apiGet("/api/v1/poles/" + encodeURIComponent(parts[0]) + "/data?hours=" + trendHours);
+    if (requestId !== trendRequestId || select.value !== key) return;
+    renderHistoryPlot(data);
+  } catch (error) {
+    if (requestId !== trendRequestId) return;
+    document.getElementById("trendPlot").innerHTML = '<div class="trend-empty">历史数据读取失败；请确认电脑中心站和数据库正常。</div>';
+    document.getElementById("trendRangeStatus").textContent = "读取失败";
+  }
+}
+
+function loadActuatorCapabilities() {
+  var host = document.getElementById("actuatorGrid");
+  if (!host) return;
+  fetch("/api/v1/actuators", { cache: "no-store" })
+    .then(function (response) { if (!response.ok) throw new Error("HTTP " + response.status); return response.json(); })
+    .then(function (result) {
+      host.replaceChildren();
+      (Array.isArray(result.data) ? result.data : []).forEach(function (item) {
+        var card = document.createElement("article");
+        card.className = "actuator-card";
+        var label = document.createElement("b");
+        label.textContent = item.label || "执行设备";
+        var state = document.createElement("span");
+        state.className = "actuator-state";
+        state.textContent = item.connected ? "已连接" : "未连接";
+        var note = document.createElement("small");
+        note.textContent = item.controllable ? "控制接口已启用" : "接口占位；不会发送控制命令";
+        card.append(label, state, note);
+        host.appendChild(card);
+      });
+      if (!host.children.length) host.textContent = "暂无预留设备类型";
+    })
+    .catch(function () { host.textContent = "能力状态读取失败；当前页面没有任何执行设备控制入口。"; });
+}
+
+function loadForecast() {
+  if (!selectedPileId) {
+    renderForecast({ method: "unavailable", current: {}, forecast: [], weather: {} });
+    return;
+  }
+  var path = "/api/v1/forecast?pile=" + encodeURIComponent(selectedPileId) + "&hours=6";
+  var lat = (document.getElementById("weatherLat").value || "").trim();
+  var lon = (document.getElementById("weatherLon").value || "").trim();
+  if (lat && lon) path += "&lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon);
+  apiGet(path).then(renderForecast).catch(function () {
+    renderForecast({ method: "unavailable", current: {}, forecast: [], weather: {},
+      note: "预测接口暂时不可用，请检查中心站连接。" });
+  });
+}
+
+/* ---------- 仓库设置弹窗 ---------- */
+var whCfg = null;
+function openWhModal() {
+  if (!whCfg) return;
+  document.getElementById("whL").value = whCfg.wh_l;
+  document.getElementById("whW").value = whCfg.wh_w;
+  document.getElementById("whH").value = whCfg.wh_h;
+  document.getElementById("whMask").classList.remove("hidden");
+}
+document.getElementById("whBtn").addEventListener("click", function () {
+  window.location.href = "/warehouses.html";
+});
+document.getElementById("whCancel").addEventListener("click", function () {
+  document.getElementById("whMask").classList.add("hidden");
+});
+document.getElementById("whForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  var body = {
+    wh_l: parseFloat(document.getElementById("whL").value) || 20,
+    wh_w: parseFloat(document.getElementById("whW").value) || 10,
+    wh_h: parseFloat(document.getElementById("whH").value) || 8,
+  };
+  apiPost("/api/v1/config", body).then(function () {
+    /* 仓尺寸变更：全部粮堆按算法重新布局（不重叠） */
+    return apiPost("/api/v1/piles/relayout", {});
+  }).then(function () {
+    document.getElementById("whMask").classList.add("hidden");
+    refresh();
+  }).catch(function () {
+    alert("保存失败，请确认中心站运行中");
+  });
+});
+
+/* ---------- 告警记录 ---------- */
+function renderAlerts(alerts) {
+  window.__activeForecastAlerts = alerts.filter(function (a) {
+    return a.active && (a.source === "forecast" || a.source === "weather_forecast");
+  });
+  var tb = document.getElementById("alertTable");
+  if (!alerts.length) {
+    tb.innerHTML = '<tr><td colspan="7" style="color:#7d93b8">暂无告警记录</td></tr>';
+    return;
+  }
+  tb.innerHTML = alerts.map(function (a) {
+    return "<tr>" +
+      "<td>" + fmtTime(a.begin_ts) + (a.end_ts ? " → " + fmtTime(a.end_ts) : "") + "</td>" +
+      "<td>" + esc(a.uid) + "</td>" +
+      "<td>" + a.node_addr + "</td>" +
+      "<td>" + (a.source === "weather_forecast" ? "天气辅助预测 +" + Number(a.forecast_hour) + "h · " :
+        a.source === "forecast" ? "探杆趋势预测 +" + Number(a.forecast_hour) + "h · " : "实测 · ") + (a.ch === "temp" ? "温度" : "相对湿度") + "</td>" +
+      "<td>" + (isFinite(Number(a.value)) ? Number(a.value).toFixed(2) : "-") + "</td>" +
+      "<td>" + (isFinite(Number(a.th)) ? Number(a.th).toFixed(2) : "-") + "</td>" +
+      "<td>" + (a.active ? '<span class="badge alarm">告警中</span>'
+                          : '<span class="badge on">已恢复</span>') + "</td>" +
+      "</tr>";
+  }).join("");
+}
+
+function updateBanner() {
+  var over = poles.filter(function (p) {
+    return p.status === 1 && p.snapshot && p.snapshot.alarm === 1;
+  });
+  var measuredAlerts = (window.__latestAlerts || []).filter(function (a) {
+    return a.active && a.source === "measured";
+  });
+  var forecastAlerts = window.__activeForecastAlerts || [];
+  var banner = document.getElementById("alertBanner");
+  var soundSignature = over.map(function (p) { return "pole:" + p.uid; })
+    .concat(measuredAlerts.map(function (a) { return "measured:" + a.id; }))
+    .concat(forecastAlerts.map(function (a) { return "forecast:" + a.id; }))
+    .sort().join("|");
+  if (over.length || measuredAlerts.length || forecastAlerts.length) {
+    banner.classList.remove("hidden");
+    var trendAlerts = forecastAlerts.filter(function (a) { return a.source !== "weather_forecast"; });
+    var weatherAlerts = forecastAlerts.filter(function (a) { return a.source === "weather_forecast"; });
+    var summary = [];
+    if (over.length) summary.push("设备告警 " + over.length + " 根");
+    if (measuredAlerts.length) summary.push("实测越限 " + measuredAlerts.length + " 项");
+    if (trendAlerts.length) summary.push("趋势预测越限 " + trendAlerts.length + " 项");
+    if (weatherAlerts.length) summary.push("天气辅助预警 " + weatherAlerts.length + " 项");
+    document.getElementById("alertText").textContent = "⚠ 当前风险：" + summary.join(" · ") + " · 完整明细见告警记录";
+    if (soundOn && soundSignature && soundSignature !== lastAlertSoundSignature) beep();
+  } else {
+    banner.classList.add("hidden");
+  }
+  lastAlertSoundSignature = soundSignature;
+}
+
+/* ---------- 由 API 数据生成的仓房空间视图 ---------- */
+function renderDataScene() {
+  if (!window.GrainDataScene) return;
+  GrainDataScene.render("grainDataScene", {
+    config: whCfg || {},
+    piles: piles,
+    poles: poles,
+    heatmap: window.__lastHeatmap || null,
+    selectedPileId: selectedPileId,
+    metric: sceneMetric,
+    probesVisible: sceneProbesVisible,
+  }, {
+    onPileClick: function (id) {
+      selectedPileId = isFinite(Number(id)) ? Number(id) : id;
+      selectedUid = null;
+      Scene3D.setSelectedPile(selectedPileId);
+      Scene3D.setSelectedPole(null);
+      renderPileTree();
+      renderPileDetail();
+      loadHeatmap();
+    },
+    onPoleClick: function (uid) { openPoleModal(uid); },
+  });
+}
+
+/* ---------- 热场加载（按选中粮堆） ---------- */
+function loadHeatmap() {
+  /* 视觉层使用 20 cm 采样；协议/API 语义不变，在细节与实时性间平衡。 */
+  var path = "/api/v1/heatmap?step=0.2";
+  if (selectedPileId) path += "&pile=" + selectedPileId;
+  apiGet(path).then(function (hm) {
+    window.__lastHeatmap = hm || null;
+    Scene3D.setHeatmap(hm);
+    renderDataScene();
+    var meta = document.getElementById("thermalMeta");
+    var evidence = document.getElementById("sceneEvidence");
+    var dataModel = GrainDataScene.buildModel({ config: whCfg || {}, piles: piles, poles: poles,
+      heatmap: hm, selectedPileId: selectedPileId, metric: sceneMetric });
+    if (!hm || !hm.points || !hm.points.length) {
+      meta.textContent = "暂无可用空间网格 · 右侧显示探杆最近一次实测";
+      evidence.textContent = "暂无热场";
+      evidence.classList.remove("live");
+      loadForecast();
+      return;
+    }
+    if (!dataModel.hasSpatialHeatField) {
+      meta.textContent = hm.points.length + " 个后端网格点 · 三维节点坐标尚未校验，不映射成粮堆色场";
+      evidence.textContent = "坐标待校验";
+      evidence.classList.remove("live");
+    } else {
+      meta.textContent = hm.points.length + " 个 IDW 空间估算样点 · 非 CFD 求解";
+      evidence.textContent = "IDW 估算";
+      evidence.classList.toggle("live", true);
+    }
+    loadForecast();
+  }).catch(function () { });
+}
+
+/* ---------- 主轮询 ---------- */
+async function refresh() {
+  try {
+    var cfg = await apiGet("/api/v1/config");
+    whCfg = cfg;
+    Scene3D.setConfig(cfg);
+    var health = await apiGet("/api/v1/health");
+    if (health && health.database) {
+      setStationHealth("live", "数据库正常 · " + health.poles.online + "/" +
+        health.poles.total + " 杆在线");
+    }
+    loadEnv();
+    var pdata = await apiGet("/api/v1/piles");
+    piles = pdata;
+    Scene3D.setPileList(piles);
+    /* 默认选中第一个粮堆 */
+    if (!selectedPileId && piles.length) {
+      selectedPileId = piles[0].id;
+      Scene3D.setSelectedPile(selectedPileId);
+    }
+    poles = await apiGet("/api/v1/poles");
+    allPoles = poles;
+    refreshTrendOptions();
+    Scene3D.updatePoles(poles);
+    renderDataScene();
+    renderStats();
+    renderPileTree();
+    renderPileDetail();
+    loadProbeForecast();
+    updateBanner();
+    loadHeatmap();
+    var alerts = await apiGet("/api/v1/alerts");
+    window.__latestAlerts = alerts;
+    renderAlerts(alerts);
+    updateBanner();
+    var nowText = fmtTime(Math.floor(Date.now() / 1000));
+    document.getElementById("refreshTime").textContent = nowText;
+    document.getElementById("topDataTime").textContent = nowText;
+    if (!health || !health.database) setStationHealth("live", "中心站已连接");
+  } catch (e) {
+    document.getElementById("refreshTime").textContent = "连接失败";
+    document.getElementById("topDataTime").textContent = "连接失败";
+    setStationHealth("error", "中心站不可达");
+  }
+}
+
+/* ---------- 拖杆保存 ---------- */
+Scene3D.setDragEnd(function (uid, x, z) {
+  apiPost("/api/v1/poles/" + encodeURIComponent(uid) + "/config", { x: x, z: z })
+    .then(function () {
+      document.getElementById("refreshTime").textContent = "已保存杆 " + uid + " 位置 (" + x + ", " + z + ")";
+    })
+    .catch(function () {
+      document.getElementById("refreshTime").textContent = "位置保存失败";
+    });
+});
+
+/* ---------- 3D 点击联动 ---------- */
+Scene3D.setOnPileClick(function (pid) {
+  selectedPileId = pid;
+  selectedUid = null;
+  Scene3D.setSelectedPole(null);
+  renderPileTree();
+  renderPileDetail();
+  loadHeatmap();
+  renderDataScene();
+});
+Scene3D.setOnPoleClick(function (uid) {
+  /* 单击 3D 探杆 -> 弹设置面板（名称/位置/间距/所属粮堆） */
+  openPoleModal(uid);
+});
+
+/* ---------- 粮堆弹窗（添加/配置共用） ---------- */
+function openPileModal(pileId) {
+  editingPileId = pileId;
+  var pl = pileId ? (piles.filter(function (p) { return p.id === pileId; })[0] || null) : null;
+  document.getElementById("modalTitle").textContent = pl ? "配置粮堆：" + pl.name : "添加粮堆";
+  document.getElementById("pfName").value = pl ? pl.name : "";
+  document.getElementById("pfWeight").value = pl ? (pl.weight_kg / 1000) : "";
+  document.getElementById("pfDensity").value = pl ? pl.density : 750;
+  document.getElementById("pfL").value = pl ? pl.l : 20;
+  document.getElementById("pfW").value = pl ? pl.w : 10;
+  renderPoleChecks(pl ? pl.poles.map(function (p) { return p.uid; }) : []);
+  updateCalcNote();
+  document.getElementById("modalMask").classList.remove("hidden");
+}
+
+function renderPoleChecks(boundUids) {
+  var box = document.getElementById("pfPoles");
+  box.innerHTML = "";
+  if (!allPoles.length) {
+    box.innerHTML = '<span class="dim">暂无探杆（等待杆子上报后自动建档）</span>';
+    return;
+  }
+  allPoles.forEach(function (p) {
+    var checked = boundUids.indexOf(p.uid) >= 0;
+    var lab = document.createElement("label");
+    lab.className = "pole-check-item";
+    lab.innerHTML = '<input type="checkbox" value="' + p.uid + '"' +
+      (checked ? " checked" : "") + "> " + esc(p.name) + " (" + esc(p.uid) + ")";
+    box.appendChild(lab);
+  });
+}
+
+function updateCalcNote() {
+  var t = parseFloat(document.getElementById("pfWeight").value) || 0;
+  var d = parseFloat(document.getElementById("pfDensity").value) || 750;
+  var l = parseFloat(document.getElementById("pfL").value) || 20;
+  var w = parseFloat(document.getElementById("pfW").value) || 10;
+  var vol = t * 1000 / d;
+  var h = 2 * vol / (l * w * (1 + 0.04));   /* 四棱锥台 s=0.2 */
+  document.getElementById("calcNote").textContent = t > 0
+    ? "算法预估：体积 " + vol.toFixed(0) + " m³，粮面高约 " + h.toFixed(2) +
+      " m（四棱锥台 s=0.2）· 位置由算法自动放置（不重叠）"
+    : "输入吨数后自动计算体积并在 3D 显示；位置由算法自动放置（不重叠）";
+}
+
+document.getElementById("addPileBtn").addEventListener("click", function () {
+  openPileModal(null);
+});
+document.getElementById("modalCancel").addEventListener("click", function () {
+  document.getElementById("modalMask").classList.add("hidden");
+});
+document.getElementById("pileForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  var body = {
+    name: document.getElementById("pfName").value || "粮堆",
+    weight_kg: (parseFloat(document.getElementById("pfWeight").value) || 0) * 1000,
+    density: parseFloat(document.getElementById("pfDensity").value) || 750,
+    l: parseFloat(document.getElementById("pfL").value) || 20,
+    w: parseFloat(document.getElementById("pfW").value) || 10,
+    pole_uids: Array.prototype.map.call(
+      document.querySelectorAll("#pfPoles input:checked"), function (c) { return c.value; }),
+  };
+  var path = editingPileId ? "/api/v1/piles/" + editingPileId : "/api/v1/piles";
+  apiPost(path, body).then(function (r) {
+    document.getElementById("modalMask").classList.add("hidden");
+    selectedPileId = r.id || editingPileId;
+    refresh();
+  });
+});
+["pfWeight", "pfDensity", "pfL", "pfW"].forEach(function (id) {
+  document.getElementById(id).addEventListener("input", updateCalcNote);
+});
+
+/* ---------- 探杆设置/添加弹窗（单击 3D 探杆 / 侧栏添加按钮） ---------- */
+var editingPoleUid = null;            // null = 添加模式
+
+function fillPileSelect(cur) {
+  var s = document.getElementById("poPile");
+  s.innerHTML = '<option value="">（不绑定）</option>';
+  piles.forEach(function (pl) {
+    var o = document.createElement("option");
+    o.value = pl.id;
+    o.textContent = pl.name;
+    if (String(pl.id) === String(cur)) o.selected = true;
+    s.appendChild(o);
+  });
+}
+
+function openPoleModal(uid) {
+  editingPoleUid = uid;
+  var p = null;
+  for (var i = 0; i < poles.length; i++) if (poles[i].uid === uid) { p = poles[i]; break; }
+  document.getElementById("poleModalTitle").textContent = p ? "探杆设置：" + p.name : "添加探杆";
+  document.getElementById("poleUidRow").style.display = uid ? "none" : "";
+  document.getElementById("poUid").value = uid ? uid : "";
+  document.getElementById("poName").value = p ? p.name : "";
+  document.getElementById("poX").value = p ? p.x : "";
+  document.getElementById("poZ").value = p ? p.z : "";
+  document.getElementById("poSpacing").value = p ? (p.spacing_m || 0.5) : 0.5;
+  fillPileSelect(p ? p.pile_id : null);
+  document.getElementById("poleMask").classList.remove("hidden");
+}
+
+document.getElementById("addPoleBtn").addEventListener("click", function () {
+  openPoleModal(null);
+});
+document.getElementById("poleCancel").addEventListener("click", function () {
+  document.getElementById("poleMask").classList.add("hidden");
+});
+document.getElementById("poleForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  var wh = whCfg || {};
+  var body = {
+    name: document.getElementById("poName").value || "探杆",
+    x: parseFloat(document.getElementById("poX").value) || 0,
+    z: parseFloat(document.getElementById("poZ").value) || 0,
+    spacing_m: parseFloat(document.getElementById("poSpacing").value) || 0.5,
+    pile_id: parseInt(document.getElementById("poPile").value, 10) || null,
+  };
+  /* 坐标约束在仓库内（边距 0.3m） */
+  body.x = Math.max(0.3, Math.min((wh.wh_l || 20) - 0.3, body.x));
+  body.z = Math.max(0.3, Math.min((wh.wh_w || 10) - 0.3, body.z));
+  if (!editingPoleUid) {
+    body.uid = document.getElementById("poUid").value.trim();
+    if (!body.uid) { alert("请填写杆 ID（UID）"); return; }
+  }
+  var path = editingPoleUid
+    ? "/api/v1/poles/" + encodeURIComponent(editingPoleUid) + "/config"
+    : "/api/v1/poles";
+  apiPost(path, body).then(function (r) {
+    document.getElementById("poleMask").classList.add("hidden");
+    if (editingPoleUid) {
+      selectedUid = editingPoleUid;
+      Scene3D.setSelectedPole(editingPoleUid);
+    } else if (r.uid) {
+      selectedUid = r.uid;
+      Scene3D.setSelectedPole(r.uid);
+    }
+    refresh();
+  }).catch(function (e) {
+    alert("保存失败：" + (e.message || "请确认中心站运行中"));
+  });
+});
+
+/* ---------- 类型选择器 ---------- */
+document.querySelectorAll("#typeSwitch button").forEach(function (b) {
+  b.addEventListener("click", function () {
+    typeKey = b.dataset.k;
+    document.querySelectorAll("#typeSwitch button").forEach(function (x) {
+      x.classList.toggle("active", x === b);
+    });
+    renderPileTree();
+  });
+});
+
+document.querySelectorAll("[data-scene-mode]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    document.querySelectorAll("[data-scene-mode]").forEach(function (x) {
+      x.classList.toggle("active", x === b);
+    });
+    Scene3D.setMetric(b.dataset.sceneMode);
+    sceneMetric = b.dataset.sceneMode;
+    renderDataScene();
+    var meta = document.getElementById("thermalMeta");
+    if (meta && b.dataset.sceneMode === "rh") {
+      meta.textContent = "相对湿度 %RH · 探杆周围空气；已校准区域可显示空间插值";
+    }
+  });
+});
+document.getElementById("sceneProbeToggle").addEventListener("click", function () {
+  var visible = Scene3D.toggleProbes();
+  sceneProbesVisible = visible;
+  this.textContent = visible ? "探杆显" : "探杆隐";
+  renderDataScene();
+});
+document.getElementById("sceneDataView").addEventListener("click", function () {
+  document.getElementById("sceneWrap").dataset.activeView = "data";
+  this.classList.add("active");
+  document.getElementById("sceneLegacyView").classList.remove("active");
+  document.getElementById("sceneHelp").textContent = "仓房、粮堆与探杆位置由当前配置生成 · 右侧为最近一次实测";
+  renderDataScene();
+});
+document.getElementById("sceneLegacyView").addEventListener("click", function () {
+  document.getElementById("sceneWrap").dataset.activeView = "legacy";
+  this.classList.add("active");
+  document.getElementById("sceneDataView").classList.remove("active");
+  document.getElementById("sceneHelp").textContent = "拖动旋转 · 滚轮缩放 · 点击查看 · Shift 拖动已校准探杆调整位置";
+});
+document.getElementById("sceneDemo").addEventListener("click", function () {
+  var enabled = this.getAttribute("aria-pressed") !== "true";
+  this.setAttribute("aria-pressed", String(enabled));
+  this.classList.toggle("active", enabled);
+  this.textContent = enabled ? "退出演示" : "模型演示";
+  document.getElementById("sceneWrap").dataset.demo = String(enabled);
+  document.getElementById("sceneLegacyView").click();
+  Scene3D.setDemo(enabled);
+});
+document.getElementById("sceneCut").addEventListener("click", function () {
+  var enabled = Scene3D.toggleCut();
+  this.setAttribute("aria-pressed", String(enabled));
+  this.classList.toggle("active", enabled);
+  this.textContent = enabled ? "角切剖面" : "完整粮堆";
+});
+document.getElementById("sceneReset").addEventListener("click", function () {
+  Scene3D.resetView();
+});
+document.getElementById("sceneFullscreen").addEventListener("click", function () {
+  Scene3D.fullscreen();
+});
+
+document.getElementById("refreshBtn").addEventListener("click", refresh);
+function setAppNavActive(href) {
+  document.querySelectorAll(".app-nav a[href^='#']").forEach(function (link) {
+    var active = link.getAttribute("href") === href;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+}
+document.querySelectorAll(".app-nav a[href^='#']").forEach(function (link) {
+  link.addEventListener("click", function () { setAppNavActive(link.getAttribute("href")); });
+});
+window.addEventListener("hashchange", function () { setAppNavActive(location.hash || "#overview"); });
+setAppNavActive(location.hash || "#overview");
+loadActuatorCapabilities();
+document.getElementById("probeForecastSelect").addEventListener("change", loadProbeForecast);
+document.getElementById("trendProbeSelect").addEventListener("change", loadTrendHistory);
+document.querySelectorAll("[data-hours]").forEach(function (button) {
+  button.addEventListener("click", function () {
+    trendHours = Number(button.dataset.hours);
+    document.querySelectorAll("[data-hours]").forEach(function (other) {
+      var active = other === button;
+      other.classList.toggle("active", active);
+      other.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    loadTrendHistory();
+  });
+});
+document.querySelectorAll("[data-trend-metric]").forEach(function (button) {
+  button.addEventListener("click", function () {
+    trendMetric = button.dataset.trendMetric === "rh" ? "rh" : "temp";
+    document.querySelectorAll("[data-trend-metric]").forEach(function (other) {
+      var active = other === button;
+      other.classList.toggle("active", active);
+      other.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    loadTrendHistory();
+  });
+});
+document.getElementById("detailPileSelect").addEventListener("change", function () {
+  selectedPileId = parseInt(this.value, 10) || null;
+  selectedUid = null;
+  Scene3D.setSelectedPile(selectedPileId);
+  Scene3D.setSelectedPole(null);
+  renderPileTree();
+  renderPileDetail();
+  loadHeatmap();
+  renderDataScene();
+});
+document.querySelectorAll("[data-trend-tab]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    document.querySelectorAll("[data-trend-tab]").forEach(function (x) {
+      var active = x === b;
+      x.classList.toggle("active", active);
+      x.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    if (b.dataset.trendTab === "trend") {
+      setAppNavActive("#overview");
+      document.getElementById("trend").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (b.dataset.trendTab === "alerts") {
+      setAppNavActive("#alerts");
+      document.getElementById("alerts").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (b.dataset.trendTab === "history") location.href = "db.html";
+  });
+});
+document.getElementById("dbBtn").addEventListener("click", function () {
+  location.href = "db.html";
+});
+document.getElementById("soundToggle").addEventListener("click", function () {
+  setAlertSoundEnabled(!soundOn);
+});
+updateSoundToggle();
+document.getElementById("weatherLoad").addEventListener("click", function () {
+  weatherCoords.lat = document.getElementById("weatherLat").value.trim();
+  weatherCoords.lon = document.getElementById("weatherLon").value.trim();
+  if (weatherCoords.lat && weatherCoords.lon) {
+    fetch("/api/v1/weather/location", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lat: Number(weatherCoords.lat), lon: Number(weatherCoords.lon) })
+    }).then(function (response) { return response.json().then(function (body) {
+      if (!response.ok) throw new Error(body.err || response.status);
+      weatherCoords.lat = String(body.lat); weatherCoords.lon = String(body.lon);
+      document.getElementById("forecastNote").textContent = "位置已保存到中心站；天气仅作室外旁证。";
+      loadForecast();
+      loadProbeForecast();
+    }); }).catch(function (error) {
+      document.getElementById("forecastNote").textContent = "天气位置保存失败：" + error.message;
+    });
+  } else {
+    document.getElementById("forecastNote").textContent = "请同时填写纬度和经度，再保存天气位置。";
+  }
+});
+
+apiGet("/api/v1/weather/location").then(function (location) {
+  weatherCoords.lat = location.lat == null ? "" : String(location.lat);
+  weatherCoords.lon = location.lon == null ? "" : String(location.lon);
+  document.getElementById("weatherLat").value = weatherCoords.lat;
+  document.getElementById("weatherLon").value = weatherCoords.lon;
+  loadForecast();
+}).catch(function () { /* The overview remains usable if the optional weather service is unavailable. */ });
+
+Scene3D.init("scene3d");
+refresh();
+setInterval(refresh, 15000);
+setInterval(function () { if (Date.now() - trendLastLoad >= 60000) loadTrendHistory(); }, 60000);
+</script>
+</body>
+</html>

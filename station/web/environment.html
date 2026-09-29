@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>环境监测 · 粮仓集成监控中心</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/station-pages.css">
+</head>
+<body class="station-page" data-station-page="environment">
+<header class="station-page-header">
+  <a class="station-page-brand" href="/index.html"><span class="station-page-brand-mark"><img src="/assets/img/grain-mark.svg" alt=""></span><span><strong>粮仓集成监控中心</strong><small>GrainSilo · 本地数据中心</small></span></a>
+  <nav class="station-page-nav" aria-label="主导航">
+    <a data-page="overview" href="/index.html">仓库总览</a><a data-page="piles" href="/piles.html">粮堆管理</a><a data-page="probes" href="/probes.html">探杆管理</a><a class="active" data-page="environment" href="/environment.html" aria-current="page">环境监测</a><a data-page="alerts" href="/alerts.html">告警中心</a><a data-page="history" href="/db.html">历史数据库</a><a data-page="crop" href="/crop-models.html">作物模型</a>
+  </nav>
+  <span class="station-page-health" data-health>中心站连接中</span>
+</header>
+<main class="station-page-main">
+  <div class="station-page-title-row">
+    <div><span class="station-eyebrow">ENVIRONMENT / MEASURED + FORECAST</span><h1>环境监测</h1><p>分开查看探杆实测、探杆周围空气温湿度预测、仓内环境传感器与室外天气模型旁证。</p></div>
+    <div class="station-toolbar"><span class="station-small" id="environmentUpdated">等待数据</span><button class="station-button" data-refresh>刷新</button></div>
+  </div>
+  <section class="station-stat-grid" aria-label="环境读数">
+    <div class="station-stat"><b id="roomTemp">—</b><span>仓内温度（独立环境传感器）</span></div>
+    <div class="station-stat"><b id="roomRh">—</b><span>仓内相对湿度（独立环境传感器）</span></div>
+    <div class="station-stat"><b id="onlineProbeCount">—</b><span>在线探杆</span></div>
+    <div class="station-stat"><b id="measuredNodeCount">—</b><span>最新实测节点</span></div>
+  </section>
+  <div class="station-content-grid station-env-grid">
+    <section class="station-stack">
+      <section class="station-card">
+        <div class="station-card-head"><div><span class="station-eyebrow">PROBE AIR STATE</span><h2>探杆实测与温湿度预测</h2></div><div class="station-inline"><label class="station-small" for="environmentProbe">探杆</label><select id="environmentProbe"></select></div></div>
+        <div class="station-inline station-select-row"><label>节点<select id="environmentNode"></select></label><span class="station-small" id="probeSampleMeta">最近采样：—</span></div>
+        <div class="station-reading-grid station-reading-grid-2" id="probeReadings"><div class="station-empty">等待探杆数据</div></div>
+        <span class="station-sr-only">实测温度与实测相对湿度</span>
+        <div class="station-forecast-grid" id="probeForecast"><div class="station-empty">预测数据读取中…</div></div>
+        <div class="station-note warning">预测对象是探杆附近空气的温度与相对湿度，不是整堆实测温度场，也不代表粮食含水率。电脑端模型与 S3 端模型分别标示，数据不足时不会外推结论。</div>
+      </section>
+      <section class="station-card">
+        <div class="station-card-head"><div><span class="station-eyebrow">S3 ADAPTIVE POLICY</span><h2>采样与上报策略</h2></div><span id="remoteConfigBadge" class="station-badge">等待设备</span></div>
+        <div class="station-reading-grid station-reading-grid-2" id="cadenceReadings"><div class="station-empty">等待设备上报周期</div></div>
+        <p class="station-footer-note">当前采样周期与上报周期由 S3 的自适应策略联动；风险档/常规档目标周期可在“告警中心”按继承范围配置。此处显示 S3 实际上报值与远程设置回执，不以期望值冒充实测执行值。</p>
+      </section>
+      <section class="station-card">
+        <div class="station-card-head"><div><span class="station-eyebrow">WAREHOUSE SENSORS</span><h2>仓内环境传感器</h2></div><span class="station-small" id="roomSensorMeta">等待环境传感器数据</span></div>
+        <div id="warehouseEnvironment" class="station-environment-grid"><div class="station-empty">当前没有独立仓内环境传感器数据；探杆周围空气读数不会冒充仓内环境读数。</div></div>
+      </section>
+    </section>
+    <aside class="station-stack">
+      <section class="station-card">
+        <div class="station-card-head"><div><span class="station-eyebrow">LOCAL WEATHER MODEL</span><h2>所在地天气旁证</h2></div><span class="station-badge" id="weatherStatus">未配置位置</span></div>
+        <p>当地逐小时天气会作为外界边界条件，进入独立的探杆周围空气温湿度预测；天气模型、探杆实测与粮仓内部环境仍分开展示。</p>
+        <form id="weatherLocationForm" class="station-form station-weather-form">
+          <div class="station-weather-tools">
+            <button id="weatherLocateButton" class="station-button" type="button">使用浏览器当前位置</button>
+            <div class="station-weather-search">
+              <label>城市 / 地区<input id="weatherSearchName" maxlength="120" placeholder="例如：宁波市 鄞州区"></label>
+              <button id="weatherSearchButton" class="station-button" type="button">搜索地点</button>
+            </div>
+          </div>
+          <p class="station-footer-note">地点数据：<a href="https://www.geonames.org/" target="_blank" rel="noopener noreferrer">GeoNames</a></p>
+          <div id="weatherSearchResults" class="station-weather-candidates" aria-live="polite"></div>
+          <div class="station-form-grid">
+            <label>纬度<input id="weatherLat" type="number" min="-90" max="90" step="any" placeholder="例如 39.90"></label>
+            <label>经度<input id="weatherLon" type="number" min="-180" max="180" step="any" placeholder="例如 116.40"></label>
+          </div>
+          <div class="station-inline"><button class="station-button primary" type="submit">保存位置并更新天气</button><span id="weatherMessage" class="station-card-message" role="status"></span></div>
+        </form>
+        <p class="station-footer-note">定位仅在点击时请求授权；地点搜索只填入候选坐标，不会自动保存。保存后，所选仓库的坐标会发给 Open-Meteo 获取天气模型数据。</p>
+        <div class="station-weather-backfill">
+          <div><b>补全历史天气</b><small>按当前仓库坐标获取逐小时网格天气模型历史，用于天气辅助预测校准；不是现场气象站实测。</small></div>
+          <label>开始日期<input id="weatherBackfillStart" type="date"></label>
+          <label>结束日期<input id="weatherBackfillEnd" type="date"></label>
+          <button id="weatherBackfillButton" class="station-button" type="button">回填所选日期</button>
+        </div>
+        <div id="weatherHistoryMessage" class="station-card-message" role="status"></div>
+        <div id="weatherCurrent" class="station-weather-current"><div class="station-empty">配置坐标后读取天气温度与相对湿度。</div></div>
+        <div class="station-weather-section-head"><b>未来 7 天逐日天气</b><small>模型预报 · 非现场气象站实测</small></div>
+        <div id="weatherDailyRows" class="station-weather-daily"><div class="station-empty">配置仓库坐标后显示 7 天预报。</div></div>
+        <div class="station-weather-section-head"><b>未来 24 小时</b><small>逐小时气温 / 相对湿度</small></div>
+        <div class="station-table-wrap station-weather-table-wrap"><table class="station-table"><thead><tr><th>时刻</th><th>气温</th><th>相对湿度</th></tr></thead><tbody id="weatherRows"><tr><td colspan="3" class="station-empty">暂无天气预报</td></tr></tbody></table></div>
+        <span class="station-footer-note" id="weatherMeta">天气数据由 Open-Meteo 模型接口提供；本机站端运行时按小时保存所选仓库的天气快照。历史快照不会冒充本地气象站实测。</span>
+        <details class="station-weather-history">
+          <summary>历史逐小时天气记录 <span id="weatherHistoryCount">0 条</span></summary>
+          <p class="station-footer-note">来源为 Open-Meteo 历史天气预报模型回算/归档；不是仓内实测，也不是附近气象站原始观测。只显示当前仓库当前坐标的记录。</p>
+          <div class="station-table-wrap station-weather-history-table"><table class="station-table"><thead><tr><th>有效时刻</th><th>气温</th><th>相对湿度</th><th>露点</th><th>数据来源</th></tr></thead><tbody id="weatherHistoryRows"><tr><td colspan="5" class="station-empty">尚无历史天气记录</td></tr></tbody></table></div>
+        </details>
+      </section>
+    </aside>
+  </div>
+</main>
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/station-pages.js"></script>
+</body>
+</html>

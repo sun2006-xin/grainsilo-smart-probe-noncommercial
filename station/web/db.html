@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>历史数据库 · 粮仓集成监控中心</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/station-pages.css">
+</head>
+<body class="station-page" data-station-page="history">
+
+<header class="station-page-header">
+  <a class="station-page-brand" href="/index.html"><span class="station-page-brand-mark"><img src="/assets/img/grain-mark.svg" alt=""></span><span><strong>粮仓集成监控中心</strong><small>GrainSilo · 本地数据中心</small></span></a>
+  <nav class="station-page-nav" aria-label="主导航">
+    <a data-page="overview" href="/index.html">仓库总览</a><a data-page="piles" href="/piles.html">粮堆管理</a><a data-page="probes" href="/probes.html">探杆管理</a><a data-page="environment" href="/environment.html">环境监测</a><a data-page="alerts" href="/alerts.html">告警中心</a><a class="active" data-page="history" href="/db.html" aria-current="page">历史数据库</a><a data-page="crop" href="/crop-models.html">作物模型</a>
+  </nav>
+  <span class="station-page-health" data-health>中心站连接中</span>
+</header>
+
+<main class="station-page-main">
+<div class="station-page-title-row"><div><span class="station-eyebrow">HISTORY / EVIDENCE</span><h1>历史数据库</h1><p>浏览真实入库的节点、仓内环境与所在地天气模型记录；无数据时明确留空，不补造曲线。</p></div><span id="historySourceStatus" class="station-small">本地 SQLite</span></div>
+
+<section class="station-card station-section-space">
+  <div class="station-card-head"><div><span class="station-eyebrow">MEASURED HISTORY</span><h2>历史趋势</h2></div><span id="historyChartSummary" class="station-small">选择数据类型与时间范围</span></div>
+  <div class="station-history-toolbar">
+    <label>数据类型<select id="historyKind"><option value="nodes">探杆节点实测</option><option value="env">仓内环境传感器</option><option value="weather">所在地天气模型</option></select></label>
+    <label>指标<select id="historyMetric"><option value="temp">温度 °C</option><option value="rh">相对湿度 %RH</option></select></label>
+    <label>时间范围<select id="historyHours"><option value="24">近 24 小时</option><option value="168" selected>近 7 天</option><option value="720">近 30 天</option></select></label>
+    <button id="historyReload" class="station-button" type="button">更新曲线</button>
+    <div class="station-history-export" aria-label="导出记录"><button class="station-button" data-export-kind="nodes">导出节点 Excel</button><button class="station-button" data-export-kind="env">导出仓内环境 Excel</button><button class="station-button" data-export-kind="weather">导出天气 Excel</button></div>
+  </div>
+  <div id="nodeHistoryChart" class="station-history-chart" role="img" aria-label="历史测点趋势图"></div>
+  <p class="station-footer-note">节点曲线是探杆上报的实测值；仓内环境数据来自独立环境传感器接口；天气曲线来自天气模型快照，并非现场气象站实测。Excel 工作簿包含数据表和筛选/来源说明页；保留 CSV 接口供外部工具使用。</p>
+</section>
+
+<!-- 筛选器 + 工具条 -->
+<div class="db-filter">
+  <label>粮堆</label>
+  <select id="fPile" onchange="onFilterChange()">
+    <option value="">全部粮堆</option>
+  </select>
+  <label>探杆</label>
+  <select id="fUid" onchange="onFilterChange()">
+    <option value="">全部探杆</option>
+  </select>
+  <label>条数</label>
+  <select id="fLimit" onchange="onFilterChange()">
+    <option value="100">最近 100 条</option>
+    <option value="500">最近 500 条</option>
+    <option value="2000">最近 2000 条</option>
+    <option value="5000" selected>最近 5000 条</option>
+  </select>
+  <div class="db-toolbar">
+    <span class="spacer"></span>
+    <button id="cleanupBtn" class="ghost db-danger">清理旧数据</button>
+    <button id="trashBtn" class="ghost">回收箱</button>
+    <button id="dbRefresh">刷新</button>
+  </div>
+</div>
+
+<!-- 汇总 chips -->
+<div class="db-stats station-section-space" id="dbStats"></div>
+<div id="historyContextSummary" class="station-note station-section-space">正在读取环境与天气历史记录…</div>
+
+<!-- 各探杆上报统计（前置，无需下滑） -->
+<section class="station-card station-section-space">
+  <h2>各探杆上报统计</h2>
+  <table>
+    <thead><tr><th>探杆</th><th>粮堆</th><th>快照数</th><th>操作</th></tr></thead>
+    <tbody id="poleStat"><tr><td colspan="4">加载中…</td></tr></tbody>
+  </table>
+</section>
+
+<!-- 数据表 -->
+<section class="station-card station-section-space">
+  <h2>节点快照（按时间倒序）</h2>
+  <div class="db-table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th><th>粮堆</th><th>探杆</th><th>节点数据</th>
+          <th>电量</th><th>模式</th><th>告警</th>
+        </tr>
+      </thead>
+      <tbody id="dbRows"><tr><td colspan="7">加载中…</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+ </main>
+
+<script src="/assets/vendor/echarts.min.js"></script>
+<script src="/assets/js/common.js"></script>
+<script>
+/* ============ 数据库页：筛选 + 表格 + 统计 + 清理 + 回收箱 ============ */
+var piles = [];
+var poles = [];
+var historyChart = null;
+var latestDbRows = [];
+
+function fillPileSel() {
+  var sel = document.getElementById("fPile");
+  sel.innerHTML = '<option value="">全部粮堆</option>';
+  piles.forEach(function (p) {
+    sel.innerHTML += '<option value="' + p.id + '">' + esc(p.name) +
+      "（" + p.pole_count + "杆 · " + p.volume.toFixed(0) + " m³）</option>";
+  });
+}
+
+function fillUidSel(keep, available) {
+  var sel = document.getElementById("fUid");
+  var old = keep === undefined ? sel.value : keep;
+  sel.innerHTML = '<option value="">全部探杆</option>';
+  (available || poles).forEach(function (p) {
+    sel.innerHTML += '<option value="' + p.uid + '">' + esc(p.name) +
+      "（" + esc(p.uid) + "）</option>";
+  });
+  sel.value = old;
+}
+
+function onFilterChange() {
+  var pileId = document.getElementById("fPile").value;
+  var uid = document.getElementById("fUid").value;
+  /* 选了粮堆时，探杆下拉联动：只显示该堆杆 */
+  var list = poles;
+  if (pileId) list = poles.filter(function (p) {
+    return String(p.pile_id) === String(pileId);
+  });
+  fillUidSel(uid, list);
+  loadDb();
+}
+
+async function loadDb() {
+  var uid = document.getElementById("fUid").value;
+  var limit = document.getElementById("fLimit").value;
+  var pileId = document.getElementById("fPile").value;
+  var hours = document.getElementById("historyHours").value;
+  var q = "/api/v1/db?limit=" + limit + "&hours=" + hours +
+    (uid ? "&uid=" + encodeURIComponent(uid) : "") +
+    (pileId ? "&pile_id=" + encodeURIComponent(pileId) : "");
+  var tb = document.getElementById("dbRows");
+  tb.innerHTML = '<tr><td colspan="7">加载中…</td></tr>';
+  try {
+    var d = await apiGet(q);
+    renderStats(d.summary);
+    renderRows(d.rows);
+    renderPoleStat(d.summary.by_pole);
+    latestDbRows = d.rows;
+    await loadHistorySeries();
+    loadContextHistory();
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="7" style="color:#ef4444">加载失败：' + esc(e.message) + "</td></tr>";
+  }
+}
+
+function setMetricOptions(options, preferred) {
+  var select = document.getElementById("historyMetric");
+  var old = preferred || select.value;
+  select.innerHTML = options.map(function (option) {
+    return '<option value="' + esc(option.value) + '">' + esc(option.label) + '</option>';
+  }).join("");
+  if (options.some(function (option) { return option.value === old; })) select.value = old;
+  else if (options.length) select.value = options[0].value;
+}
+
+function showHistoryChart(series, axisName, summary) {
+  var host = document.getElementById("nodeHistoryChart");
+  document.getElementById("historyChartSummary").textContent = summary;
+  if (!window.echarts) { host.textContent = "图表组件不可用；历史数据仍可在表格及 CSV 导出中查看。"; return; }
+  if (!historyChart) historyChart = echarts.init(host);
+  var hasData = series.some(function (line) { return line.data.length; });
+  historyChart.setOption({
+    animation: false,
+    color: ["#087d6c", "#188db0", "#d99024", "#9a70bd", "#d25c4b", "#6c9f3b"],
+    tooltip: { trigger: "axis", valueFormatter: function (value) { return value == null ? "—" : Number(value).toFixed(2) + " " + axisName; } },
+    legend: { type: "scroll", top: 4, textStyle: { color: "#6c8581" } },
+    grid: { left: 58, right: 22, top: 42, bottom: 68 },
+    xAxis: { type: "time", axisLabel: { color: "#6c8581" }, axisLine: { lineStyle: { color: "#dce9e5" } } },
+    yAxis: { type: "value", name: axisName, scale: true, nameTextStyle: { color: "#6c8581" }, axisLabel: { color: "#6c8581" }, splitLine: { lineStyle: { color: "#edf2ef" } } },
+    dataZoom: [{ type: "inside", filterMode: "none" }, { type: "slider", height: 18, bottom: 8 }],
+    series: series.map(function (line) { return { name: line.name, type: "line", showSymbol: line.data.length < 80, symbolSize: 5, connectNulls: false, emphasis: { focus: "series" }, data: line.data }; }),
+    graphic: hasData ? [] : [{ type: "text", left: "center", top: "middle", style: { text: "此时间范围没有已存记录", fill: "#6c8581", fontSize: 15 } }]
+  }, true);
+}
+
+async function loadHistorySeries() {
+  var kind = document.getElementById("historyKind").value;
+  var metric = document.getElementById("historyMetric");
+  var hours = document.getElementById("historyHours").value;
+  if (kind === "nodes") {
+    setMetricOptions([{ value: "temp", label: "温度 °C" }, { value: "rh", label: "相对湿度 %RH" }]);
+    var key = metric.value;
+    var groups = new Map();
+    latestDbRows.slice().reverse().forEach(function (row) {
+      (row.nodes || []).forEach(function (node) {
+        var value = node[key];
+        if (value === null || value === undefined || !isFinite(Number(value))) return;
+        var name = row.uid + " / 地址 " + (node.addr == null ? "?" : node.addr);
+        if (!groups.has(name)) groups.set(name, []);
+        groups.get(name).push([Number(row.ts) * 1000, Number(value)]);
+      });
+    });
+    var names = Array.from(groups.keys()).sort();
+    var visible = names.slice(0, 12).map(function (name) { return { name: name, data: groups.get(name) }; });
+    var unit = key === "temp" ? "°C" : "%RH";
+    showHistoryChart(visible, unit, names.length ? names.length + " 个实测节点系列 · 最多显示 12 条" : "所选范围没有节点实测值");
+    return;
+  }
+
+  try {
+    var lines = [];
+    if (kind === "env") {
+      var envRows = await apiGet("/api/v1/env?hours=" + hours);
+      var numericKeys = Array.from(new Set(envRows.flatMap(function (row) {
+        return Object.keys(row.data || {}).filter(function (field) { return typeof row.data[field] === "number" && isFinite(row.data[field]); });
+      }))).sort();
+      setMetricOptions(numericKeys.map(function (field) { return { value: field, label: field }; }));
+      var field = metric.value;
+      lines = numericKeys.includes(field) ? [{ name: "仓内环境 · " + field, data: envRows.filter(function (row) { return typeof row.data[field] === "number"; }).map(function (row) { return [Number(row.ts) * 1000, row.data[field]]; }) }] : [];
+      showHistoryChart(lines, field, envRows.length ? envRows.length + " 条独立环境传感器记录" : "暂无独立仓内环境历史记录");
+      return;
+    }
+    var result = await apiGet("/api/v1/weather/history?hours=" + hours);
+    setMetricOptions([{ value: "temperature_c", label: "模型气温 °C" }, { value: "rh_pct", label: "模型相对湿度 %RH" }]);
+    var weatherKey = metric.value;
+    var weatherRows = (result.data || []).filter(function (run) { return run.current && run.current[weatherKey] != null; }).map(function (run) { return [Number(run.current.ts) * 1000, Number(run.current[weatherKey])]; }).sort(function (a, b) { return a[0] - b[0]; });
+    lines = weatherRows.length ? [{ name: "所在地天气模型 · " + (result.data[0]?.source || ""), data: weatherRows }] : [];
+    showHistoryChart(lines, weatherKey === "temperature_c" ? "°C" : "%RH", weatherRows.length ? weatherRows.length + " 个已保存天气模型快照" : "暂无天气模型历史；配置位置并更新后开始记录");
+  } catch (error) {
+    showHistoryChart([], "", "历史读取失败：" + error.message);
+  }
+}
+
+async function loadContextHistory() {
+  var hours = document.getElementById("historyHours").value;
+  var host = document.getElementById("historyContextSummary");
+  try {
+    var results = await Promise.all([
+      apiGet("/api/v1/env?hours=" + hours),
+      apiGet("/api/v1/weather/history?hours=" + hours)
+    ]);
+    host.textContent = "所选范围内：仓内独立环境传感器 " + results[0].length +
+      " 条记录；天气模型 " + (results[1].data || []).length +
+      " 个小时快照。两者来源独立，天气模型不冒充现场实测。";
+  } catch (error) {
+    host.textContent = "环境/天气历史暂时读取失败：" + error.message;
+  }
+}
+
+function renderStats(s) {
+  document.getElementById("dbStats").innerHTML =
+    '<div class="chip"><b>' + s.total + "</b>总快照</div>" +
+    '<div class="chip"><b>' + s.by_pole.length + "</b>探杆有数据</div>" +
+    '<div class="chip"><b style="color:' + (s.alerts_active ? "#ef4444" : "#22c55e") +
+    '">' + s.alerts_active + "</b>活跃告警</div>";
+}
+
+function nodesCell(nodes) {
+  if (!nodes || !nodes.length) return '<span style="color:#4a5a75">-</span>';
+  return nodes.map(function (nd, i) {
+    var addr = nd.addr || (i + 1);
+    var t = nd.temp === null || nd.temp === undefined ? "-" : nd.temp.toFixed(1) + "°C";
+    var h = nd.rh === null || nd.rh === undefined ? "-" : nd.rh.toFixed(0) + "%";
+    return '<span class="db-node">N' + addr + " " + t + " " + h + "</span>";
+  }).join(" ");
+}
+
+function renderRows(rows) {
+  var tb = document.getElementById("dbRows");
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" style="color:#7d93b8">无数据（等待杆子上报）</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(function (r) {
+    var bat = r.bat_mv ? batPct(r.bat_mv) : null;
+    return "<tr>" +
+      "<td>" + fmtTime(r.ts) + "</td>" +
+      "<td>" + (r.pile_name ? esc(r.pile_name) : '<span style="color:#4a5a75">未绑定</span>') + "</td>" +
+      "<td>" + esc(r.name) + '<div style="color:#4a5a75;font-size:11px">' + esc(r.uid) + "</div></td>" +
+      "<td>" + nodesCell(r.nodes) + "</td>" +
+      "<td>" + (bat === null ? "-" : bat + "%") + "</td>" +
+      "<td>" + (r.mode === 1 ? "调试" : "低功耗") + "</td>" +
+      "<td>" + (r.alarm === 1 ? '<span class="badge alarm">超限</span>'
+                               : '<span class="badge on">正常</span>') + "</td>" +
+      "</tr>";
+  }).join("");
+}
+
+function batPct(mv) {
+  var p = (mv - 3300) / (4200 - 3300) * 100;
+  return Math.round(Math.max(0, Math.min(100, p)));
+}
+
+function renderPoleStat(list) {
+  var tb = document.getElementById("poleStat");
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="4" style="color:#7d93b8">暂无数据</td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(function (p) {
+    return "<tr>" +
+      "<td>" + esc(p.name) + '<div style="color:#4a5a75;font-size:11px">' + esc(p.uid) + "</div></td>" +
+      "<td>" + (p.pile_name ? esc(p.pile_name) : '<span style="color:#4a5a75">未绑定</span>') + "</td>" +
+      "<td>" + p.count + "</td>" +
+      '<td><button class="ghost small" onclick="window.location.href=' +
+      "'pole.html?uid=" + encodeURIComponent(p.uid) + "'" + '">详情 →</button> ' +
+      '<button class="pn-del" onclick="delPole(' +
+      "'" + p.uid.replace(/'/g, "\\'") + "','" + esc(p.name) + "'" + ')">删除</button></td>' +
+      "</tr>";
+  }).join("");
+}
+
+/* 删除探杆（移入回收箱，数据保留可恢复） */
+async function delPole(uid, name) {
+  if (!confirm("将探杆「" + name + "」(" + uid + ") 移入回收箱？\n其历史数据全部保留，可在回收箱恢复或彻底删除。")) return;
+  var resp = await fetch("/api/v1/poles/" + encodeURIComponent(uid), { method: "DELETE" });
+  var j = await resp.json().catch(function () { return {}; });
+  if (!resp.ok) { alert("删除失败：" + (j.err || resp.status)); return; }
+  alert("已移入回收箱（保留 " + j.snap_count + " 条快照，可在回收箱恢复）");
+  onFilterChange();
+}
+
+/* 清理旧数据（防硬盘膨胀）：删除保留条数之外的早期快照 */
+async function cleanupData() {
+  var uid = document.getElementById("fUid").value;
+  var limit = parseInt(document.getElementById("fLimit").value, 10) || 500;
+  if (!uid) {
+    alert("请先在上方「探杆」下拉选择要清理的探杆。\n已删除探杆的历史数据请到回收箱彻底删除。");
+    return;
+  }
+  if (!confirm("将删除探杆「" + uid + "」除最近 " + limit + " 条外的全部历史快照？\n此操作不可恢复，确定？")) return;
+  var resp = await fetch("/api/v1/db/cleanup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: uid, keep: limit }),
+  });
+  var j = await resp.json().catch(function () { return {}; });
+  if (!resp.ok) { alert("清理失败：" + (j.err || resp.status)); return; }
+  alert("已清理 " + j.deleted + " 条旧快照");
+  onFilterChange();
+}
+
+document.getElementById("dbRefresh").addEventListener("click", onFilterChange);
+document.getElementById("historyReload").addEventListener("click", onFilterChange);
+document.getElementById("historyKind").addEventListener("change", loadHistorySeries);
+document.getElementById("historyMetric").addEventListener("change", loadHistorySeries);
+document.getElementById("historyHours").addEventListener("change", onFilterChange);
+document.querySelectorAll("[data-export-kind]").forEach(function (button) {
+  button.addEventListener("click", function () {
+    var params = new URLSearchParams({ kind: button.dataset.exportKind,
+      hours: document.getElementById("historyHours").value });
+    if (button.dataset.exportKind === "nodes") {
+      var uid = document.getElementById("fUid").value;
+      var pileId = document.getElementById("fPile").value;
+      if (uid) params.set("uid", uid);
+      if (pileId) params.set("pile_id", pileId);
+    }
+    location.href = "/api/v1/db/export.xlsx?" + params.toString();
+  });
+});
+document.getElementById("cleanupBtn").addEventListener("click", cleanupData);
+document.getElementById("trashBtn").addEventListener("click", function () {
+  location.href = "trash.html";
+});
+
+/* 初始化 */
+(async function initDb() {
+  try {
+    piles = await apiGet("/api/v1/piles");
+    poles = await apiGet("/api/v1/poles");
+    fillPileSel();
+    fillUidSel();
+    onFilterChange();
+    loadContextHistory();
+  } catch (e) {
+    document.getElementById("dbRows").innerHTML =
+      '<tr><td colspan="7" style="color:#ef4444">无法连接中心站：' + esc(e.message) + "</td></tr>";
+  }
+})();
+window.addEventListener("resize", function () { if (historyChart) historyChart.resize(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>探杆管理 · 粮仓集成监控中心</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/station-pages.css">
+</head>
+<body class="station-page" data-station-page="probes">
+<header class="station-page-header">
+  <a class="station-page-brand" href="/index.html"><span class="station-page-brand-mark"><img src="/assets/img/grain-mark.svg" alt=""></span><span><strong>粮仓集成监控中心</strong><small>GrainSilo · 本地数据中心</small></span></a>
+  <nav class="station-page-nav" aria-label="主导航">
+    <a data-page="overview" href="/index.html">仓库总览</a><a data-page="piles" href="/piles.html">粮堆管理</a><a class="active" data-page="probes" href="/probes.html" aria-current="page">探杆管理</a><a data-page="environment" href="/environment.html">环境监测</a><a data-page="alerts" href="/alerts.html">告警中心</a><a data-page="history" href="/db.html">历史数据库</a><a data-page="crop" href="/crop-models.html">作物模型</a>
+  </nav>
+  <span class="station-page-health" data-health>中心站连接中</span>
+</header>
+<main class="station-page-main">
+  <div class="station-page-title-row">
+    <div><span class="station-eyebrow">ASSETS / FIELD CALIBRATION</span><h1>探杆管理</h1><p>集中管理全部探杆、粮堆绑定、通信节点和站端几何档案。</p></div>
+    <div class="station-toolbar"><button class="station-button" data-refresh>刷新数据</button><button class="station-button primary" id="probeCreateToggle" type="button">登记探杆</button></div>
+  </div>
+  <section class="station-stat-grid" aria-label="探杆统计">
+    <div class="station-stat"><b id="probeTotal">—</b><span>已登记探杆</span></div>
+    <div class="station-stat"><b id="probeOnline">—</b><span>在线探杆</span></div>
+    <div class="station-stat"><b id="probeOffline">—</b><span>离线探杆</span></div>
+    <div class="station-stat"><b id="probeNodeTotal">—</b><span>最近快照节点数</span></div>
+  </section>
+  <section class="station-card station-section-space" id="probeCreatePanel" hidden>
+    <div class="station-card-head"><h2>登记一根探杆</h2><button class="station-button" id="probeCreateClose" type="button">收起</button></div>
+    <form id="probeCreateForm" class="station-form">
+      <div class="station-form-grid">
+        <label>探杆 UID<input id="newPoleUid" required maxlength="32" placeholder="必须使用设备实际上报的 UID"></label>
+        <label>显示名称<input id="newPoleName" maxlength="40" placeholder="如：1号粮堆中心杆"></label>
+        <label>所属粮堆<select id="newPolePile"><option value="">暂不绑定</option></select></label>
+        <label>节点间距（m）<input id="newPoleSpacing" type="number" min="0.1" step="0.1" value="0.5"></label>
+        <label>X（m）<input id="newPoleX" type="number" min="0" step="0.1" value="0"></label>
+        <label>Y（m）<input id="newPoleY" type="number" min="0" step="0.1" value="0"></label>
+        <label>Z（m）<input id="newPoleZ" type="number" min="0" step="0.1" value="0"></label>
+      </div>
+      <div class="station-note warning">这里只登记站端坐标和通信档案。节点地址是协议身份，不代表探杆上/中/下；节点的实际高度与倾斜角仍需逐点现场校准后才能作为 3D 位置使用。</div>
+      <div class="station-inline"><button class="station-button primary" type="submit">保存登记</button><span id="probeCreateMessage" class="station-card-message" role="status"></span></div>
+    </form>
+  </section>
+  <section class="station-card station-section-space" id="probeEditPanel" hidden>
+    <div class="station-card-head"><h2>编辑探杆档案</h2><button class="station-button" id="probeEditClose" type="button">取消</button></div>
+    <form id="probeEditForm" class="station-form">
+      <input id="editPoleUid" type="hidden">
+      <div class="station-form-grid">
+        <label>显示名称<input id="editPoleName" maxlength="40"></label>
+        <label>所属粮堆<select id="editPolePile"><option value="">暂不绑定</option></select></label>
+        <label>X（m）<input id="editPoleX" type="number" min="0" step="0.1"></label>
+        <label>Y（m）<input id="editPoleY" type="number" min="0" step="0.1"></label>
+        <label>Z（m）<input id="editPoleZ" type="number" min="0" step="0.1"></label>
+        <label>节点间距（m）<input id="editPoleSpacing" type="number" min="0.1" step="0.1"></label>
+      </div>
+      <div class="station-inline"><button class="station-button primary" type="submit">保存档案</button><span id="probeEditMessage" class="station-card-message" role="status"></span></div>
+    </form>
+  </section>
+  <section class="station-card station-section-space">
+    <div class="station-card-head"><h2>探杆清单</h2><span class="station-small" id="probeListMeta">读取中</span></div>
+    <div class="station-list" id="probesList"><div class="station-empty">正在读取探杆档案…</div></div>
+  </section>
+</main>
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/station-pages.js"></script>
+</body>
+</html>

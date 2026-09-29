@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>仓库档案 · 粮仓集成监控中心</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/station-pages.css">
+</head>
+<body class="station-page" data-station-page="warehouses">
+<header class="station-page-header">
+  <a class="station-page-brand" href="/index.html"><span class="station-page-brand-mark"><img src="/assets/img/grain-mark.svg" alt=""></span><span><strong>粮仓集成监控中心</strong><small>GrainSilo · 本地数据中心</small></span></a>
+  <nav class="station-page-nav" aria-label="主导航">
+    <a data-page="overview" href="/index.html">仓库总览</a><a data-page="piles" href="/piles.html">粮堆管理</a><a data-page="probes" href="/probes.html">探杆管理</a><a data-page="environment" href="/environment.html">环境监测</a><a data-page="alerts" href="/alerts.html">告警中心</a><a data-page="history" href="/db.html">历史数据库</a><a data-page="crop" href="/crop-models.html">作物模型</a>
+  </nav>
+  <span class="station-page-health" data-health>中心站连接中</span>
+</header>
+<main class="station-page-main">
+  <div class="station-page-title-row">
+    <div><span class="station-eyebrow">WAREHOUSE / ASSET REGISTER</span><h1>仓库档案</h1><p>每个仓库拥有独立粮堆、探杆、历史、天气坐标及阈值配置；旧数据已归入 1 号主仓。</p></div>
+    <div class="station-toolbar"><button class="station-button" data-refresh>刷新档案</button><button class="station-button primary" id="warehouseCreateToggle" type="button">新增仓库</button></div>
+  </div>
+  <section class="station-stat-grid" aria-label="仓库档案概况">
+    <div class="station-stat"><b id="warehouseTotal">—</b><span>已建仓库</span></div>
+    <div class="station-stat"><b id="warehouseShapeSummary">—</b><span>当前仓型</span></div>
+    <div class="station-stat"><b id="warehousePileTotal">—</b><span>当前仓粮堆</span></div>
+    <div class="station-stat"><b id="warehouseProbeTotal">—</b><span>当前仓探杆</span></div>
+  </section>
+  <section class="station-card station-section-space" id="warehouseCreatePanel" hidden>
+    <div class="station-card-head"><h2>新增仓库档案</h2><button class="station-button" id="warehouseCreateClose" type="button">收起</button></div>
+    <form id="warehouseCreateForm" class="station-form">
+      <div class="station-form-grid">
+        <label>仓库名称<input id="newWarehouseName" required maxlength="64" placeholder="如：2号圆筒仓"></label>
+        <label>仓型<select id="newWarehouseShape"><option value="flat">平房仓</option><option value="silo">圆筒仓 / 圆仓</option></select></label>
+        <label data-warehouse-flat>仓房长度（m）<input id="newWarehouseLength" type="number" min="0.5" max="500" step="0.1" value="20"></label>
+        <label data-warehouse-flat>仓房宽度（m）<input id="newWarehouseWidth" type="number" min="0.5" max="500" step="0.1" value="10"></label>
+        <label data-warehouse-silo hidden>仓房直径（m）<input id="newWarehouseDiameter" type="number" min="0.5" max="500" step="0.1" value="12"></label>
+        <label>仓房高度（m）<input id="newWarehouseHeight" type="number" min="0.5" max="500" step="0.1" value="8"></label>
+        <label>粮堆估算休止角（°）<input id="newWarehouseRepose" type="number" min="10" max="60" step="1" value="30"></label>
+      </div>
+      <div class="station-note warning">新仓初始没有粮堆、探杆或天气坐标。休止角是用于估算几何的假设值，应按粮种与现场堆形校核；粮堆体积来自“登记吨数 ÷ 登记容重”，不等同于测绘体积。</div>
+      <div class="station-inline"><button class="station-button primary" type="submit">创建仓库</button><span class="station-card-message" id="warehouseCreateMessage" role="status"></span></div>
+    </form>
+  </section>
+  <div class="station-content-grid station-section-space">
+    <section class="station-card">
+      <div class="station-card-head"><h2>当前仓房参数</h2><span class="station-small" id="warehouseCurrentLabel">读取中</span></div>
+      <form id="warehouseEditForm" class="station-form">
+        <div class="station-form-grid">
+          <label>仓库名称<input id="warehouseName" required maxlength="64"></label>
+          <label>仓型<select id="warehouseShape"><option value="flat">平房仓</option><option value="silo">圆筒仓 / 圆仓</option></select></label>
+          <label data-warehouse-flat>仓房长度（m）<input id="warehouseLength" type="number" min="0.5" max="500" step="0.1"></label>
+          <label data-warehouse-flat>仓房宽度（m）<input id="warehouseWidth" type="number" min="0.5" max="500" step="0.1"></label>
+          <label data-warehouse-silo hidden>仓房直径（m）<input id="warehouseDiameter" type="number" min="0.5" max="500" step="0.1"></label>
+          <label>仓房高度（m）<input id="warehouseHeight" type="number" min="0.5" max="500" step="0.1"></label>
+          <label>粮堆估算休止角（°）<input id="warehouseRepose" type="number" min="10" max="60" step="1"></label>
+        </div>
+        <div class="station-note warning" id="warehouseGeometryNote">尺寸改变会影响后续几何估算；若新尺寸会使已登记粮堆越界，系统将拒绝保存。仓型切换在当前粮堆重新配置前会被阻止。</div>
+        <div class="station-inline"><button class="station-button primary" type="submit">保存当前仓档案</button><span class="station-card-message" id="warehouseEditMessage" role="status"></span></div>
+      </form>
+    </section>
+    <section class="station-card">
+      <div class="station-card-head"><h2>仓库清单</h2><span class="station-small" id="warehouseListMeta">读取中</span></div>
+      <div class="station-list" id="warehouseList"><div class="station-empty">正在读取仓库档案…</div></div>
+      <div class="station-note">仓库采用停用保护而非物理删除，避免误删历史记录。天气位置可在“环境监测”中为当前仓单独设置。</div>
+      <a class="station-button" href="/environment.html">配置当前仓天气位置 →</a>
+    </section>
+  </div>
+</main>
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/station-pages.js"></script>
+</body>
+</html>

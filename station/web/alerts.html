@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>告警中心 · 粮仓集成监控中心</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/station-pages.css">
+</head>
+<body class="station-page" data-station-page="alerts">
+<header class="station-page-header">
+  <a class="station-page-brand" href="/index.html"><span class="station-page-brand-mark"><img src="/assets/img/grain-mark.svg" alt=""></span><span><strong>粮仓集成监控中心</strong><small>GrainSilo · 本地数据中心</small></span></a>
+  <nav class="station-page-nav" aria-label="主导航">
+    <a data-page="overview" href="/index.html">仓库总览</a><a data-page="piles" href="/piles.html">粮堆管理</a><a data-page="probes" href="/probes.html">探杆管理</a><a data-page="environment" href="/environment.html">环境监测</a><a class="active" data-page="alerts" href="/alerts.html" aria-current="page">告警中心</a><a data-page="history" href="/db.html">历史数据库</a><a data-page="crop" href="/crop-models.html">作物模型</a>
+  </nav>
+  <span class="station-page-health" data-health>中心站连接中</span>
+</header>
+<main class="station-page-main">
+  <div class="station-page-title-row">
+    <div><span class="station-eyebrow">GRAIN CONDITION / ALERTS</span><h1>粮情告警中心</h1><p>实测越限与温湿度预测风险分开展示；调整站端告警阈值，并将生效设置版本下发至对应 S3。</p></div>
+    <div class="station-toolbar"><button id="alertSoundToggle" class="station-button" type="button" aria-pressed="false">提示音：关</button><button class="station-button" data-refresh>刷新</button></div>
+  </div>
+  <section class="station-stat-grid" aria-label="告警统计">
+    <div class="station-stat"><b id="activeAlertCount">—</b><span>当前活动告警</span></div>
+    <div class="station-stat"><b id="measuredAlertCount">—</b><span>实测告警（实测越限）</span></div>
+    <div class="station-stat"><b id="forecastAlertCount">—</b><span>预测风险</span></div>
+    <div class="station-stat"><b id="pendingDeviceConfigs">—</b><span>等待 S3 确认的设置</span></div>
+  </section>
+  <div class="station-content-grid">
+    <section class="station-card">
+      <div class="station-card-head"><div><span class="station-eyebrow">INHERITANCE / REMOTE SETTINGS</span><h2>阈值继承与自适应周期</h2></div><span id="thresholdScopeLabel" class="station-badge">仓库默认</span></div>
+      <p>生效优先级：仓库默认 → 粮堆覆盖 → 探杆覆盖。粮堆或探杆输入留空表示继承；仓库默认必须填写。周期配置控制 S3 的常规档/风险档，采样和上报保持联动。</p>
+      <div class="station-form-grid station-scope-grid">
+        <label>设置范围<select id="thresholdScope"><option value="warehouse">仓库默认</option><option value="pile">粮堆覆盖</option><option value="probe">探杆覆盖</option></select></label>
+        <label id="thresholdTargetLabel" hidden>目标<select id="thresholdTarget"></select></label>
+      </div>
+      <form id="thresholdForm" class="station-form station-section-space">
+        <fieldset class="station-setting-fieldset"><legend>实测与预测风险阈值</legend><div class="station-form-grid">
+          <label>温度上限 °C<input data-setting="temp_high" type="number" step="0.01" required></label>
+          <label>温度下限 °C<input data-setting="temp_low" type="number" step="0.01" required></label>
+          <label>相对湿度上限 %RH<input data-setting="rh_high" type="number" min="0" max="100" step="0.01" required></label>
+          <label>相对湿度下限 %RH<input data-setting="rh_low" type="number" min="0" max="100" step="0.01" required></label>
+        </div></fieldset>
+        <fieldset class="station-setting-fieldset"><legend>S3 自适应周期（秒）</legend><div class="station-form-grid">
+          <label>常规档采样/上报<input data-setting="normal_interval_sec" type="number" min="1" max="86400" step="1" required></label>
+          <label>风险档采样/上报<input data-setting="fast_interval_sec" type="number" min="5" max="3600" step="1" required></label>
+        </div><span class="station-small">风险档周期须不大于常规档。网页只显示远程设置已排队或 S3 已回执；没有回执时不会标成已应用。</span></fieldset>
+        <div id="thresholdEffective" class="station-threshold-effective"></div>
+        <div class="station-inline"><button class="station-button primary" type="submit">保存并下发设置</button><button class="station-button" id="thresholdReset" type="button">恢复继承</button><span id="thresholdMessage" class="station-card-message" role="status"></span></div>
+      </form>
+      <div class="station-note alert station-section-space">S3 配置会在设备下一次向电脑站上报时收到；掉线期间设置保持等待，不会假报成功。AutoLink 总线协议语义不变，只扩展中心站与 S3 的应用层设置回执。</div>
+    </section>
+    <section class="station-card">
+      <div class="station-card-head"><div><span class="station-eyebrow">LIVE / FORECAST RISKS</span><h2>告警与预测风险记录</h2></div><label class="station-small">显示<select id="alertFilter"><option value="active">仅活动</option><option value="all">全部记录</option></select></label></div>
+      <div class="station-note warning">提示音默认关闭；开关状态会在总览与告警页同步。关闭声音只静音提示，不清除告警记录、不改变设备阈值。</div>
+      <div class="station-alert-list" id="stationAlertList"><div class="station-empty">正在读取告警记录…</div></div>
+      <p class="station-footer-note">实测告警基于节点实测温度/相对湿度；预测风险基于现有 S3 与电脑端独立预测。预测的是探杆周围空气状态，不代表粮食含水率，也不是未经验证的 CFD 热场。</p>
+    </section>
+  </div>
+</main>
+<script src="/assets/js/common.js"></script>
+<script src="/assets/js/station-pages.js"></script>
+</body>
+</html>
