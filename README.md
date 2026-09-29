@@ -5,6 +5,16 @@
 <h1 align="center">粮仓探杆综合检测系统</h1>
 <p align="center"><strong>GrainSilo Smart Probe</strong></p>
 <p align="center">模块化温湿度采集 · RS-485 汇总 · 局域网主动上报 · Windows 本地管理</p>
+<p align="center">
+  <img alt="MCU: ESP32-S3 and ESP32-C3" src="https://img.shields.io/badge/MCU-ESP32--S3%20%2B%20ESP32--C3-00796B?style=flat-square">
+  <img alt="Current prototype sensors: three SHT31 nodes" src="https://img.shields.io/badge/Sensors-3%C3%97%20SHT31%20(current%20prototype)-B88935?style=flat-square">
+  <img alt="RS-485 with MAX3485" src="https://img.shields.io/badge/Bus-RS--485%20%2B%20MAX3485-0B5563?style=flat-square">
+  <img alt="AutoLink in-house protocol; full details not public" src="https://img.shields.io/badge/Protocol-AutoLink%20(in--house%2C%20limited%20public%20scope)-496A81?style=flat-square">
+  <img alt="Local station: Python and SQLite" src="https://img.shields.io/badge/Station-Python%20%2B%20SQLite-377A68?style=flat-square">
+  <img alt="Web: HTML, CSS, JavaScript" src="https://img.shields.io/badge/Web-HTML%20%2F%20CSS%20%2F%20JavaScript-2D7188?style=flat-square">
+  <img alt="Visualization: Three.js and ECharts" src="https://img.shields.io/badge/Visualization-Three.js%20%2B%20ECharts-385C78?style=flat-square">
+  <img alt="S3 actively reports over Wi-Fi on the local network" src="https://img.shields.io/badge/Network-Wi--Fi%20LAN%20(active%20upload)-68804D?style=flat-square">
+</p>
 
 > 本仓库公开 GrainSilo 项目源码与用户版电脑中心站。**AutoLink 自研协议暂不开源**；GrainSilo 软件采用定制非商业许可，并非 OSI 标准开源许可证。硬件接线资料按单独声明的范围采用 CC BY 4.0。
 
