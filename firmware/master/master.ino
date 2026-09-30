@@ -95,6 +95,22 @@ static int snapshot_index(uint8_t addr)
     return (int)s_nodeCount++;
 }
 
+static void record_node_wire_error(uint8_t addr, uint8_t error_code)
+{
+    int index = -1;
+    for (uint8_t i = 0u; i < s_nodeCount; ++i) {
+        if (g_snap[i].valid && g_snap[i].addr == addr) {
+            index = (int)i;
+            break;
+        }
+    }
+    if (index < 0) return;
+    SnapNode *node = &g_snap[index];
+    node->last_wire_error = error_code;
+    if (node->wire_error_count != UINT32_MAX) ++node->wire_error_count;
+    node->last_wire_error_at_ms = millis();
+}
+
 static bool node_channel_value(const SnapNode *node, uint8_t channel,
                                float *value)
 {
@@ -186,8 +202,14 @@ static void cache_sample(uint8_t addr, const gs_sample_t *sample, bool trusted)
     if (index < 0) return;
 
     SnapNode *node = &g_snap[index];
+    const uint8_t last_wire_error = node->last_wire_error;
+    const uint32_t wire_error_count = node->wire_error_count;
+    const uint32_t last_wire_error_at_ms = node->last_wire_error_at_ms;
     memset(node, 0, sizeof(*node));
     node->addr = addr;
+    node->last_wire_error = last_wire_error;
+    node->wire_error_count = wire_error_count;
+    node->last_wire_error_at_ms = last_wire_error_at_ms;
     node->stype = sample->sensor_type;
     node->status = sample->status;
     for (uint8_t i = 0u; i < sample->channel_count &&
@@ -266,13 +288,18 @@ static int build_snapshot_json(char *buffer, size_t capacity)
         }
         const int written = snprintf(
             buffer + length, capacity - (size_t)length,
-            "%s{\"addr\":%u,\"type\":%u,\"temp\":%s,\"rh\":%s,\"status\":%u,\"sample_boot_id\":%lu,\"sample_seq\":%lu,\"sample_age_ms\":%lu,\"forecast\":",
+            "%s{\"addr\":%u,\"type\":%u,\"temp\":%s,\"rh\":%s,\"status\":%u,\"sample_boot_id\":%lu,\"sample_seq\":%lu,\"sample_age_ms\":%lu,\"last_wire_error\":%u,\"wire_error_count\":%lu,\"wire_error_age_ms\":%s,\"forecast\":",
             first ? "" : ",", (unsigned)node->addr, (unsigned)node->stype,
             have_temperature ? String(temperature / 100.0f, 2).c_str() : "null",
             have_humidity ? String(humidity / 100.0f, 2).c_str() : "null",
             (unsigned)node->status, (unsigned long)node->sample_boot_id,
             (unsigned long)node->sample_seq,
-            (unsigned long)(millis() - node->sampled_at_ms));
+            (unsigned long)(millis() - node->sampled_at_ms),
+            (unsigned)node->last_wire_error,
+            (unsigned long)node->wire_error_count,
+            node->wire_error_count ?
+                String((unsigned long)(millis() - node->last_wire_error_at_ms)).c_str() :
+                "null");
         if (written < 0 || (size_t)written >= capacity - (size_t)length)
             return -1;
         length += written;
@@ -497,6 +524,17 @@ static void process_response(const gs_frame_t *frame)
     if (event.kind == AL_MASTER_EVENT_ACCEPTED &&
         event.payload_kind == AL_MASTER_PAYLOAD_SAMPLE)
         handle_application_sample(frame, event.payload_trusted);
+    if (event.kind == AL_MASTER_EVENT_ACCEPTED && event.wire_error != 0u) {
+        record_node_wire_error(frame->addr, event.wire_error);
+        const uint32_t now_ms = millis();
+        if (s_last_response_diag_ms == 0u ||
+            (uint32_t)(now_ms - s_last_response_diag_ms) >= 2000u) {
+            Serial.printf("[RS485] node-wire-error addr=0x%02X response_func=0x%02X code=0x%02X seq=%u\n",
+                          (unsigned)frame->addr, (unsigned)frame->func,
+                          (unsigned)event.wire_error, (unsigned)frame->seq);
+            s_last_response_diag_ms = now_ms;
+        }
+    }
     if (event.kind == AL_MASTER_EVENT_REJECTED) {
         const uint32_t now_ms = millis();
         if (s_last_response_diag_ms == 0u ||

@@ -55,7 +55,17 @@ static bool read_sample(void *, gs_sample_t *sample)
     uint8_t status = 0u;
     if (!sensor_read(channels, &count, &status)) {
         sensor_auto_detect();
-        if (!sensor_read(channels, &count, &status)) status |= GS_STATUS_SENSOR_ERR;
+        /* A retry is a new measurement attempt; do not carry error bits or
+         * channel metadata from the failed first read into a valid retry. */
+        count = 0u;
+        status = 0u;
+        if (!sensor_read(channels, &count, &status)) {
+            status |= GS_STATUS_SENSOR_ERR;
+            memset(sample, 0, sizeof(*sample));
+            sample->sensor_type = sensor_current_type();
+            sample->status = status;
+            return false;
+        }
     }
     memset(sample, 0, sizeof(*sample));
     sample->sensor_type = sensor_current_type();

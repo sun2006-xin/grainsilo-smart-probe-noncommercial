@@ -133,6 +133,14 @@ static String statusJson(void)
         s += (unsigned long)sn->sample_seq;
         s += ",\"sample_age_ms\":";
         s += (unsigned long)(millis() - sn->sampled_at_ms);
+        s += ",\"last_wire_error\":";
+        s += sn->last_wire_error;
+        s += ",\"wire_error_count\":";
+        s += (unsigned long)sn->wire_error_count;
+        s += ",\"wire_error_age_ms\":";
+        s += sn->wire_error_count ?
+             String((unsigned long)(millis() - sn->last_wire_error_at_ms)) :
+             String("null");
         s += ",\"forecast\":";
         s += forecastJson(g_forecasts[i]);
         s += "}";
