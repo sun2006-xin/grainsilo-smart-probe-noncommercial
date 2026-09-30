@@ -21,6 +21,9 @@ typedef struct {
     uint32_t sampled_at_ms;
     uint32_t sample_boot_id;
     uint32_t sample_seq;
+    uint8_t  last_wire_error;   /* 最近一次已验收的节点协议错误；不属于测量值 */
+    uint32_t wire_error_count;  /* 当前 S3 启动周期内累计次数 */
+    uint32_t last_wire_error_at_ms;
 } SnapNode;
 
 extern uint8_t  s_nodeCount;    /* main.ino 定义 */
