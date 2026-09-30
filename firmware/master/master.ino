@@ -54,6 +54,10 @@ static uint8_t s_safe_prediction_streak;
 static uint64_t s_last_report_ms;
 static bool s_has_reported;
 static QueueHandle_t s_settings_queue;
+static uint32_t s_sample_sequence[GRAIN_SILO_NODE_MAX];
+static uint32_t s_sample_boot_id;
+static uint32_t s_last_parse_diag_ms;
+static uint32_t s_last_response_diag_ms;
 
 #define GRAIN_REPORT_JSON_CAPACITY 4096u
 #define GRAIN_FORECAST_MIN_MAX_AGE_MS UINT64_C(180000)
@@ -195,6 +199,11 @@ static void cache_sample(uint8_t addr, const gs_sample_t *sample, bool trusted)
         ++node->nch;
     }
     node->valid = true;
+    node->sampled_at_ms = millis();
+    ++s_sample_sequence[index];
+    if (s_sample_sequence[index] == 0u) ++s_sample_sequence[index];
+    node->sample_boot_id = s_sample_boot_id;
+    node->sample_seq = s_sample_sequence[index];
     s_last_sample_ms = millis();
 
     const uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000u;
@@ -226,7 +235,7 @@ static int build_snapshot_json(char *buffer, size_t capacity)
         "\"adaptive_fast\":%d,\"sample_interval_ms\":%lu,"
         "\"report_interval_ms\":%lu,\"report_queue_replacements\":%lu,"
         "\"remote_config_revision\":%lu,"
-        "\"bat_mv\":%u,\"ts\":0,\"nodes\":[",
+        "\"sample_boot_id\":%lu,\"bat_mv\":%u,\"ts\":0,\"nodes\":[",
         poleUidStr(), mode_get() == MODE_DEBUG ? 1 : 0,
         alarm_is_active() ? 1 : 0, g_measurement_risk ? 1 : 0,
         g_prediction_risk ? 1 : 0, g_adaptive_fast ? 1 : 0,
@@ -234,6 +243,7 @@ static int build_snapshot_json(char *buffer, size_t capacity)
         (unsigned long)g_report_interval_ms,
         (unsigned long)g_report_queue_replacements,
         (unsigned long)alarm_remote_config_revision(),
+        (unsigned long)s_sample_boot_id,
         (unsigned)oled_bus_mv());
     if (length < 0 || (size_t)length >= capacity) return -1;
 
@@ -256,11 +266,13 @@ static int build_snapshot_json(char *buffer, size_t capacity)
         }
         const int written = snprintf(
             buffer + length, capacity - (size_t)length,
-            "%s{\"addr\":%u,\"type\":%u,\"temp\":%s,\"rh\":%s,\"status\":%u,\"forecast\":",
+            "%s{\"addr\":%u,\"type\":%u,\"temp\":%s,\"rh\":%s,\"status\":%u,\"sample_boot_id\":%lu,\"sample_seq\":%lu,\"sample_age_ms\":%lu,\"forecast\":",
             first ? "" : ",", (unsigned)node->addr, (unsigned)node->stype,
             have_temperature ? String(temperature / 100.0f, 2).c_str() : "null",
             have_humidity ? String(humidity / 100.0f, 2).c_str() : "null",
-            (unsigned)node->status);
+            (unsigned)node->status, (unsigned long)node->sample_boot_id,
+            (unsigned long)node->sample_seq,
+            (unsigned long)(millis() - node->sampled_at_ms));
         if (written < 0 || (size_t)written >= capacity - (size_t)length)
             return -1;
         length += written;
@@ -454,6 +466,9 @@ static void handle_application_sample(const gs_frame_t *frame, bool trusted)
 
 static void apply_core_event(const al_master_event_t *event)
 {
+    if (event->kind == AL_MASTER_EVENT_TIMEOUT && event->node_index >= 0)
+        Serial.printf("[RS485] transaction-timeout node_index=%d; registered offline nodes are re-probed by Master Core\n",
+                      (int)event->node_index);
     if (event->persist_registry) {
         /* Consume the Core dirty edge with the same durable write; otherwise
          * the next unrelated TX would repeat the already-resolved commit. */
@@ -482,6 +497,16 @@ static void process_response(const gs_frame_t *frame)
     if (event.kind == AL_MASTER_EVENT_ACCEPTED &&
         event.payload_kind == AL_MASTER_PAYLOAD_SAMPLE)
         handle_application_sample(frame, event.payload_trusted);
+    if (event.kind == AL_MASTER_EVENT_REJECTED) {
+        const uint32_t now_ms = millis();
+        if (s_last_response_diag_ms == 0u ||
+            (uint32_t)(now_ms - s_last_response_diag_ms) >= 2000u) {
+            Serial.printf("[RS485] response-rejected addr=0x%02X func=0x%02X seq=%u len=%u\n",
+                          (unsigned)frame->addr, (unsigned)frame->func,
+                          (unsigned)frame->seq, (unsigned)frame->len);
+            s_last_response_diag_ms = now_ms;
+        }
+    }
 }
 
 static void poll_uart(void)
@@ -498,8 +523,18 @@ static void poll_uart(void)
     if (s_rx_len > 0u && (al_time_us_t)esp_timer_get_time() - s_rx_last_us >=
         (al_time_us_t)GS_TIMING_T_IFG_MS * 1000u) {
         gs_frame_t frame;
-        if (gs_frame_parse(s_rx, s_rx_len, &frame) == GS_PARSE_OK)
+        const int parse_status = (int)gs_frame_parse(s_rx, s_rx_len, &frame);
+        if (parse_status == GS_PARSE_OK) {
             process_response(&frame);
+        } else {
+            const uint32_t now_ms = millis();
+            if (s_last_parse_diag_ms == 0u ||
+                (uint32_t)(now_ms - s_last_parse_diag_ms) >= 2000u) {
+                Serial.printf("[RS485] frame-parse-failed status=%d bytes=%u\n",
+                              parse_status, (unsigned)s_rx_len);
+                s_last_parse_diag_ms = now_ms;
+            }
+        }
         s_rx_len = 0u;
     }
 }
@@ -524,6 +559,8 @@ void setup(void)
     al_storage_port_t storage = {NULL, storage_read, storage_write};
     al_master_platform_status_t platform;
     Serial.begin(115200);
+    s_sample_boot_id = esp_random();
+    if (s_sample_boot_id == 0u) s_sample_boot_id = 1u;
     mode_init();
     alarm_init(mode_get());
     net_init();
