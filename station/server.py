@@ -146,9 +146,65 @@ def remember_nodes(conn, uid, nodes, ts):
         if addr is None:
             continue
         seen[addr] = True
-        _node_last[(uid, addr)] = ts
+        sample_ts = _node_sample_ts(nd, ts)
+        _node_last[(uid, addr)] = sample_ts
         conn.execute("INSERT OR REPLACE INTO pole_nodes(uid,addr,last_ts) "
-                     "VALUES(?,?,?)", (uid, addr, ts))
+                     "VALUES(?,?,?)", (uid, addr, sample_ts))
+
+
+def _node_sample_ts(node, received_ts):
+    """Estimate the actual sensor sample time from S3 monotonic age."""
+    age_ms = node.get("sample_age_ms") if isinstance(node, dict) else None
+    if isinstance(age_ms, bool):
+        return int(received_ts)
+    try:
+        age_ms = float(age_ms)
+    except (TypeError, ValueError, OverflowError):
+        return int(received_ts)
+    if not math.isfinite(age_ms) or age_ms < 0 or age_ms > 0xFFFFFFFF:
+        return int(received_ts)
+    return int(received_ts) - int(age_ms // 1000)
+
+
+def _fresh_sample_nodes(conn, uid, nodes, received_ts):
+    """Return only readings newer than the persisted node sample."""
+    row = conn.execute(
+        "SELECT ts,nodes_json FROM snapshots WHERE uid=? "
+        "ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
+    previous = {}
+    previous_ts = 0
+    if row:
+        previous_ts = int(row[0] or 0)
+        try:
+            for node in json.loads(row[1] or "[]"):
+                if isinstance(node, dict) and node.get("addr") is not None:
+                    previous[node["addr"]] = node
+        except (TypeError, ValueError):
+            previous = {}
+
+    fresh = []
+    for node in nodes:
+        addr = node.get("addr") if isinstance(node, dict) else None
+        if addr is None:
+            continue
+        old = previous.get(addr)
+        has_identity = "sample_boot_id" in node and "sample_seq" in node
+        old_has_identity = (isinstance(old, dict) and
+                            "sample_boot_id" in old and "sample_seq" in old)
+        if has_identity:
+            is_new = (not old_has_identity or
+                      node.get("sample_boot_id") != old.get("sample_boot_id") or
+                      node.get("sample_seq") != old.get("sample_seq"))
+        elif "sample_age_ms" in node:
+            is_new = (not isinstance(old, dict) or
+                      "sample_age_ms" not in old or
+                      _node_sample_ts(node, received_ts) >
+                      _node_sample_ts(old, previous_ts) + 1)
+        else:
+            is_new = True
+        if is_new:
+            fresh.append(node)
+    return fresh
 
 
 def load_node_memory():
@@ -987,7 +1043,8 @@ def _probe_samples(conn, uid, addr, limit=2048):
             try:
                 if int(node.get("addr", -1)) != int(addr):
                     continue
-                samples.append({"ts": int(ts), "temp": node.get("temp"),
+                samples.append({"ts": _node_sample_ts(node, ts),
+                                "temp": node.get("temp"),
                                 "rh": node.get("rh")})
                 break
             except (TypeError, ValueError):
@@ -1018,7 +1075,8 @@ def _probe_hourly_samples(conn, uid, addr, warehouse_id, limit=900):
             try:
                 if int(node.get("addr", -1)) != int(addr):
                     continue
-                samples.append({"ts": int(ts), "temp": node.get("temp"),
+                samples.append({"ts": _node_sample_ts(node, ts),
+                                "temp": node.get("temp"),
                                 "rh": node.get("rh")})
                 break
             except (TypeError, ValueError):
@@ -2172,14 +2230,16 @@ class Handler(BaseHTTPRequestHandler):
         bat = snap.get("bat_mv")
         if bat:
             conn.execute("UPDATE poles SET bat_mv=? WHERE uid=?", (float(bat), uid))
+        reported_nodes = snap.get("nodes", [])
+        fresh_nodes = _fresh_sample_nodes(conn, uid, reported_nodes, now)
         _store_minute_snapshot(conn, uid, snap, now)
         # 节点级在线跟踪（记忆：曾见过的节点地址永久保留，落库防重启丢失）
-        remember_nodes(conn, uid, snap.get("nodes", []), now)
+        remember_nodes(conn, uid, reported_nodes, now)
         policy_warehouse_id = int(self.warehouse_id or 1)
         _evaluate_weather_cadence(conn, uid, policy_warehouse_id, now)
         cfg = effective_thresholds(conn, uid=uid)["values"]
-        _update_alarm(uid, snap.get("nodes", []), conn, cfg)
-        _update_forecast_alerts(conn, uid, snap.get("nodes", []), cfg, now)
+        _update_alarm(uid, fresh_nodes, conn, cfg)
+        _update_forecast_alerts(conn, uid, fresh_nodes, cfg, now)
         _sync_device_settings(conn, uid)
         reported_revision = snap.get("remote_config_revision")
         if isinstance(reported_revision, int) and not isinstance(reported_revision, bool):

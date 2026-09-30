@@ -18,6 +18,9 @@ typedef struct {
     gs_channel_t ch[GS_CH_MAX];
     uint8_t  nch;
     bool     valid;
+    uint32_t sampled_at_ms;
+    uint32_t sample_boot_id;
+    uint32_t sample_seq;
 } SnapNode;
 
 extern uint8_t  s_nodeCount;    /* main.ino 定义 */

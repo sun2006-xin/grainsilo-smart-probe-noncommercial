@@ -127,6 +127,12 @@ static String statusJson(void)
         s += isnan(rh) ? String("null") : String(rh, 2);
         s += ",\"status\":";
         s += sn->status;
+        s += ",\"sample_boot_id\":";
+        s += (unsigned long)sn->sample_boot_id;
+        s += ",\"sample_seq\":";
+        s += (unsigned long)sn->sample_seq;
+        s += ",\"sample_age_ms\":";
+        s += (unsigned long)(millis() - sn->sampled_at_ms);
         s += ",\"forecast\":";
         s += forecastJson(g_forecasts[i]);
         s += "}";
@@ -238,9 +244,11 @@ function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp
 var nodeRows=[],selectedNode=0,currentMode='debug',toastTimer=0;
 function setConn(ok,text){var el=document.getElementById('status');el.className='status-pill'+(ok?'':' offline');document.getElementById('connText').textContent=text;if(ok)document.getElementById('lastOk').textContent='更新于：'+new Date().toLocaleString()}
 function sampleAge(ms){if(ms===null||ms===undefined||!isFinite(Number(ms)))return '等待数据';var sec=Math.max(0,Math.floor(Number(ms)/1000));if(sec<60)return sec+' 秒前';if(sec<3600)return Math.floor(sec/60)+' 分钟前';if(sec<86400)return Math.floor(sec/3600)+' 小时前';return Math.floor(sec/86400)+' 天前'}
+function nodeIsStale(row){var age=Number(row&&row.sample_age_ms),interval=Number(window.sampleIntervalMs||10000);return !isFinite(age)||age>Math.max(60000,interval*3)}
 function fmt(value,unit,digits){if(value===null||value===undefined||!isFinite(Number(value)))return '— <small>'+unit+'</small>';return Number(value).toFixed(digits)+' <small>'+unit+'</small>'}
 function renderNodeForecast(node){
  var status=document.getElementById('nodeForecastStatus'),meta=document.getElementById('nodeForecastMeta'),host=document.getElementById('nodeForecastPoints');
+ if(nodeIsStale(node)){status.textContent='节点实测数据陈旧';meta.textContent='该节点超过采样周期阈值未收到新样本；旧读数仅供追溯，不作为当前预测依据。';host.innerHTML='<span>等待节点恢复采样后再显示预测。</span>';return}
  var forecast=node&&node.forecast?node.forecast:null;
  if(!forecast){status.textContent='等待数据';meta.textContent='仅用本节点有效实测温度与相对湿度外推；不是粮食含水率预测。';host.innerHTML='<span>尚无有效节点预测</span>';return}
  if(forecast.status!=='ready'){
@@ -261,9 +269,9 @@ function renderNodeInventory(rows) {
   var type=String(row.stype||'未知传感器'),role=type==='SHT31'?'温度与相对湿度采集（SHT31，单点）':type==='GENERIC'?'通用传感器节点；具体职责待配置':'传感器类型 '+type+'；具体职责待确认';
   var temp=row.temp===null||row.temp===undefined||!isFinite(Number(row.temp))?'未上报':Number(row.temp).toFixed(2)+' ℃';
   var rh=row.rh===null||row.rh===undefined||!isFinite(Number(row.rh))?'未上报':Number(row.rh).toFixed(2)+' %RH';
-  var alarm=Number(row.status)!==0;
-  return '<article class="inventory-node"><div class="inventory-node-head"><b>'+address+'</b><span class="badge '+(alarm?'off':'')+'">'+(alarm?'告警':'正常')+'</span></div>'+
-   '<p class="inventory-role">'+esc(type)+' · '+esc(role)+'</p><div class="inventory-values">'+
+  var alarm=Number(row.status)!==0,stale=nodeIsStale(row),state=alarm?'告警':stale?'数据陈旧':'正常';
+  return '<article class="inventory-node"><div class="inventory-node-head"><b>'+address+'</b><span class="badge '+((alarm||stale)?'off':'')+'">'+state+'</span></div>'+
+   '<p class="inventory-role">'+esc(type)+' · '+esc(role)+' · 最近采样 '+sampleAge(row.sample_age_ms)+'</p><div class="inventory-values">'+
    '<div class="inventory-value"><span>温度</span><strong>'+temp+'</strong></div><div class="inventory-value"><span>相对湿度</span><strong>'+rh+'</strong></div></div></article>';
  }).join('');
 }
@@ -276,12 +284,12 @@ function renderHomeNodeList(rows) {
   var type=esc(String(row.stype||'未知传感器'));
   var temp=row.temp===null||row.temp===undefined||!isFinite(Number(row.temp))?'—':Number(row.temp).toFixed(1)+' °C';
   var rh=row.rh===null||row.rh===undefined||!isFinite(Number(row.rh))?'—':Number(row.rh).toFixed(1)+' %RH';
-  var abnormal=Number(row.status||0)!==0;
+  var abnormal=Number(row.status||0)!==0,stale=nodeIsStale(row),state=abnormal?'状态异常':stale?'数据陈旧':'正常';
   return '<a class="home-node-row" href="#data" data-route="data" data-home-address="'+(isFinite(rawAddr)?rawAddr:'')+'">'+
    '<span class="home-node-identity"><b>节点 '+address+'</b><small>'+type+' · 地址 '+(isFinite(rawAddr)?rawAddr:'未知')+'</small></span>'+
    '<span class="home-node-value"><small>温度</small><b>'+temp+'</b></span>'+
    '<span class="home-node-value"><small>相对湿度</small><b>'+rh+'</b></span>'+
-   '<span class="badge '+(abnormal?'off':'')+'">'+(abnormal?'状态异常':'正常')+'</span></a>';
+   '<span class="badge '+((abnormal||stale)?'off':'')+'">'+state+' · '+sampleAge(row.sample_age_ms)+'</span></a>';
  }).join('');
 }
 /* HOME_NODE_RENDERER_END */
@@ -295,7 +303,7 @@ function renderSelected(){
   document.getElementById('nodeAddr').textContent=address;
   document.getElementById('homeNodes').innerHTML=renderHomeNodeList(nodeRows);
  document.getElementById('sensorType').textContent=node?String(node.stype):'—';
- document.getElementById('nodeSampleTime').textContent=node?sampleAge(window.sampleAgeMs):'等待数据';
+ document.getElementById('nodeSampleTime').textContent=node?sampleAge(node.sample_age_ms):'等待数据';
  document.getElementById('nodeTemp').innerHTML=node?fmt(node.temp,'°C',1):'— <small>°C</small>';
  document.getElementById('nodeRh').innerHTML=node?fmt(node.rh,'%RH',1):'— <small>%RH</small>';
  document.getElementById('tempReading').classList.toggle('empty',!node||node.temp===null);
@@ -306,7 +314,8 @@ function renderSelected(){
  if(!total)table.innerHTML='<tr><td colspan="5">暂无有效节点；请检查 RS485、节点供电和采样周期。</td></tr>';
  else nodeRows.forEach(function(row){
   var addr=('0'+Number(row.addr).toString(16).toUpperCase()).slice(-2);
-  table.innerHTML+='<tr><td>0x'+addr+'</td><td>'+esc(row.stype)+'</td><td>'+(row.temp===null?'—':Number(row.temp).toFixed(2)+' ℃')+'</td><td>'+(row.rh===null?'—':Number(row.rh).toFixed(2)+' %RH')+'</td><td><span class="badge '+(row.status?'off':'')+'">'+(row.status?'告警':'正常')+'</span></td></tr>';
+  var stale=nodeIsStale(row),alarm=Number(row.status)!==0,state=alarm?'告警':stale?'数据陈旧':'正常';
+  table.innerHTML+='<tr><td>0x'+addr+'</td><td>'+esc(row.stype)+'</td><td>'+(row.temp===null?'—':Number(row.temp).toFixed(2)+' ℃')+'</td><td>'+(row.rh===null?'—':Number(row.rh).toFixed(2)+' %RH')+'</td><td><span class="badge '+((alarm||stale)?'off':'')+'">'+state+'</span><small style="display:block;color:#82928c;margin-top:4px">'+sampleAge(row.sample_age_ms)+'</small></td></tr>';
  });
  document.getElementById('aboutNodeCount').textContent=total+' 个有效节点';
  document.getElementById('aboutNodes').innerHTML=renderNodeInventory(nodeRows);
@@ -327,6 +336,7 @@ function refresh(){
    selectedNode=same>=0?same:Math.min(selectedNode,Math.max(0,nodeRows.length-1));
   }else selectedNode=Math.min(selectedNode,Math.max(0,nodeRows.length-1));
   window.sampleAgeMs=data.sample_age_ms;
+  window.sampleIntervalMs=Number(data.sample_interval_ms||data.interval_ms)||10000;
   currentMode=String(data.mode||'debug').toLowerCase();
   var modeLabel=currentMode==='lowpower'?'低功耗模式':'调试模式';
   document.getElementById('runMode').value=currentMode==='lowpower'?'lowpower':'debug';
