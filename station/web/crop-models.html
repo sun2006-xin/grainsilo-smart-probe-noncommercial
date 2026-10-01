@@ -102,7 +102,7 @@
     <section class="crop-live-panel" aria-labelledby="liveForecastTitle">
       <div class="crop-section-title">
         <span class="crop-index">03</span>
-        <div><h2 id="liveForecastTitle">探杆趋势接入与作物 EMC 情景</h2><p>同一测点分别展示 S3 预测与电脑端独立重算</p></div>
+        <div><h2 id="liveForecastTitle">统一探杆预测与作物 EMC 情景</h2><p>Station 与 S3 使用同一训练模型、版本和推理参数</p></div>
       </div>
       <div class="crop-live-controls">
         <label class="crop-field">当前粮堆的探杆节点
@@ -112,7 +112,7 @@
         <span class="live-forecast-status" id="probeForecastStatus" role="status">尚未读取预测</span>
       </div>
       <p class="crop-live-note">预测对象是探杆周围空气温度与相对湿度，不是整堆粮粒温度，也不是粮食含水率。若已选择作物，未来空气情景会再计算对应 EMC 参考值；这不表示粮食会在该时刻达到 EMC。</p>
-      <div class="crop-live-results" id="probeForecastResults" aria-live="polite"><div class="crop-live-empty">选择粮堆和节点后读取 S3 与电脑端预测。</div></div>
+      <div class="crop-live-results" id="probeForecastResults" aria-live="polite"><div class="crop-live-empty">选择粮堆和节点后读取统一预测；验证未达标时显示持续性基线，不外推模型结论。</div></div>
     </section>
 
     <section class="crop-model-sources" aria-labelledby="sourcesTitle">

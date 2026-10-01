@@ -1,4 +1,4 @@
-"""Conservative cadence policy driven by validated probe-air forecasts.
+"""Conservative cadence policy driven by validated unified probe-air forecasts.
 
 This module is deliberately independent from persistence and AutoLink Wire.
 The station decides a desired normal interval; the existing versioned settings
@@ -50,6 +50,10 @@ def _point_crossings(point, thresholds):
         ("rh_pct", "rh_low", "humidity_low", "low"),
     )
     for measurement_key, threshold_key, reason, direction in checks:
+        validation_key = ("temperature_validated" if measurement_key == "temperature_c"
+                          else "rh_validated")
+        if point.get(validation_key) is False:
+            continue
         measured = _finite_number(point.get(measurement_key))
         threshold = _finite_number(thresholds.get(threshold_key))
         if measured is None or threshold is None:
@@ -61,7 +65,7 @@ def _point_crossings(point, thresholds):
 
 
 def advance_weather_cadence_state(state, predictions, thresholds, now_ts=None):
-    """Advance persisted cadence state using independent model predictions.
+    """Advance cadence using one unified model and per-output validation flags.
 
     A risk-level crossing is a validated threshold crossing at +1 hour. A
     crossing at a later available horizon is watch-level. If a probe has a
@@ -73,7 +77,21 @@ def advance_weather_cadence_state(state, predictions, thresholds, now_ts=None):
     thresholds = thresholds if isinstance(thresholds, dict) else {}
     ready = [item for item in predictions
              if isinstance(item, dict) and item.get("status") == "ready"]
-    complete = bool(predictions) and len(ready) == len(predictions)
+    def complete_short_horizon(prediction):
+        forecast = prediction.get("forecast")
+        if not isinstance(forecast, list):
+            return False
+        first_hour = next((point for point in forecast
+                           if isinstance(point, dict) and
+                           _finite_number(point.get("hour")) == 1), None)
+        if first_hour is None:
+            return False
+        return (first_hour.get("temperature_validated", True) is True and
+                first_hour.get("rh_validated", True) is True)
+
+    complete = bool(predictions) and all(
+        isinstance(item, dict) and item.get("status") == "ready" and
+        complete_short_horizon(item) for item in predictions)
     if not ready:
         result["status"] = "waiting_for_validated_forecast"
         return result

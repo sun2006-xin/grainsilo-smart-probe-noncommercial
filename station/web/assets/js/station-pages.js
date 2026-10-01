@@ -380,37 +380,24 @@
 
   function renderProbePrediction(result) {
     const host = document.getElementById("probeForecast");
-    const station = result.station_prediction || {};
-    const s3 = result.s3_prediction || {};
-    const weather = result.weather_prediction || {};
-    const byHour = new Map((station.forecast || []).map(point => [Number(point.hour), point]));
-    const s3ByHour = new Map((s3.points || []).map(point => [Number(point.hour), point]));
-    const weatherByHour = new Map((weather.forecast || []).map(point => [Number(point.hour), point]));
-    const coverage = new Map((station.horizon_coverage || []).map(item => [Number(item.hour), item]));
-    const weatherReady = weather.status === "ready";
-    const pairCount = Number(weather.pair_count || 0);
-    const weatherState = weatherReady ? "已通过本地留出验证" : ({
-      warming_up: `历史配对不足（温度/水汽各需 72 个逐小时转移；当前 ${pairCount}）`,
-      not_validated: "当前历史未通过留出验证，暂不显示天气辅助预测数值",
-      not_configured: "尚未配置当前仓库天气位置",
-      unavailable: "天气预报暂不可用",
-      stale: "探杆最新读数已过期"
-    }[weather.status] || "天气辅助模型尚未就绪");
-    const explained = [1, 3, 6].map(hour => {
-      const a = byHour.get(hour), b = s3ByHour.get(hour), c = weatherByHour.get(hour);
-      const diag = coverage.get(hour);
-      const stationValues = a ? `${formatReading(a.temperature_c, "°C")} · ${formatReading(a.rh_pct, "%RH", 0)}` : "尚未达到该时段门槛";
-      const stationCoverage = diag ? `${diag.sample_count} 个半小时点（至少 6 个） · ${durationText(diag.history_span_seconds)} / ${durationText(diag.required_span_seconds)}` : `${station.sample_count || 0} 个点 · 总覆盖 ${durationText(station.span_seconds)}`;
-      const s3Values = b ? `${formatReading(b.temp, "°C")} · ${formatReading(b.rh, "%RH", 0)}` : (s3.status === "stale" ? "设备端样本已过期" : "设备端历史预热中");
-      const s3Coverage = `${s3.sample_count || 0} 个 RAM 样本 · 覆盖 ${durationText(s3.span_s)}`;
-      const weatherValues = c ? `${formatReading(c.temperature_c, "°C")} · ${formatReading(c.rh_pct, "%RH", 0)}` : weatherState;
-      return `<article class="station-forecast-card"><span>未来 +${hour} 小时</span><b>${stationValues}</b><small>电脑端探杆历史趋势 · ${stationCoverage}</small><small>${s3Values} · S3 设备端预测 · ${s3Coverage}</small><small class="station-weather-prediction-value">天气辅助模型：${weatherValues}</small></article>`;
+    const prediction = result.unified_prediction || {};
+    const model = result.model || {};
+    const points = new Map((prediction.forecast || []).map(point => [Number(point.hour), point]));
+    const state = prediction.status === "ready" ? "统一模型（该输出通过留出验证）" :
+      prediction.status === "candidate" ? "模型已训练，当前输出未通过基线验证" :
+      prediction.status === "stale" ? "最新节点读数已过期" :
+      prediction.status === "warming_up" ? "等待新鲜节点读数" : "持续性基线（无需预热）";
+    const cards = [1, 3, 6].map(hour => {
+      const point = points.get(hour);
+      if (!point) return `<article class="station-forecast-card"><span>未来 +${hour} 小时</span><b>暂无有效值</b><small>${esc(prediction.reason || "节点数据不可用")}</small></article>`;
+      const tempState = point.temperature_validated ? "模型输出 · 已验证" : "当前值基线 · 未验证";
+      const rhState = point.rh_validated ? "模型输出 · 已验证" : "当前值基线 · 未验证";
+      return `<article class="station-forecast-card"><span>未来 +${hour} 小时</span><b>${formatReading(point.temperature_c, "°C")} · ${formatReading(point.rh_pct, "%RH", 0)}</b><small>温度：${tempState}</small><small>相对湿度：${rhState}</small></article>`;
     }).join("");
-    const tempDiag = weather.temperature_calibration || {};
-    const rhDiag = weather.vapor_pressure_calibration || {};
-    const skill = [tempDiag.skill_score, rhDiag.skill_score].filter(value => Number.isFinite(Number(value)));
-    const modelMeta = weatherReady && skill.length ? ` 温度/水汽留出技巧分数：${skill.map(value => `${(Number(value) * 100).toFixed(1)}%`).join(" / ")}。` : "";
-    host.innerHTML = `<div class="station-forecast-explainer"><b>三路预测分别显示 · 天气辅助状态：${esc(weatherState)}</b><span>电脑端探杆趋势只用节点历史；S3 预测来自设备；天气辅助模型将探杆空气温湿度、历史逐小时天气与未来逐小时天气作为拟合输入。温度和水汽各需至少 72 个有效逐小时配对转移，并通过按时间留出的持续性基线验证后才显示。验证达标且预测越限时，会形成独立天气辅助预警，并可影响 S3 采样/上报周期目标；设备端收到并确认后才视为应用。${esc(weather.note || "天气数据是网格模型，不是现场气象站；目标是探杆周围空气，不是整堆粮温或粮食含水率。")}${esc(modelMeta)}</span></div>${explained}`;
+    const deviceState = model.device_synced ? "S3 已同步同一模型版本" :
+      `S3 版本 ${Number(model.device_version || 0)}，中心站版本 ${Number(model.version || 0)}`;
+    const weatherState = result.weather?.status === "included" ? "已纳入当前网格天气上下文" : "当前无可用天气上下文";
+    host.innerHTML = `<div class="station-forecast-explainer"><b>统一温湿度预测 · ${esc(state)} · 模型 v${Number(model.version || 0)}</b><span>${esc(deviceState)}；${esc(weatherState)}。模型从当前仓库历史数据训练，+1h / +3h / +6h 各自按时间留出结果决定是否启用；未达标的温度或湿度通道显示当前值保持基线，不参与预测告警或采样控制。天气为外部网格模型数据，不是仓内实测。${esc(result.note || "预测目标为探杆周围空气温湿度，不是整仓粮温或粮食含水率。")}</span></div>${cards}`;
   }
 
   function loadEnvironmentPage() {
@@ -467,7 +454,7 @@
         const cadence = remote?.weather_cadence || {};
         const cadenceMode = { normal: "常规", watch: "天气观察", risk: "天气风险" }[cadence.mode] || "未改变周期";
         const cadenceStatus = {
-          waiting_for_validated_forecast: "等待天气辅助模型通过验证",
+          waiting_for_validated_forecast: "等待统一模型输出通过验证",
           waiting_for_all_probe_forecasts: "部分节点预测未验证，不据此恢复周期",
           validated_limit_crossing: "预测越限，已请求加快采样/上报",
           validated_safe_forecast: "有效预测暂未越限",
@@ -485,7 +472,7 @@
         const cadenceAck = remote?.status === "applied" ? `S3 已确认 v${remote.revision}` : `等待 S3 确认 v${remote?.revision ?? "—"}`;
         document.getElementById("remoteConfigBadge").className = "station-badge " + (remote?.status === "applied" ? "ok" : "warn");
         document.getElementById("remoteConfigBadge").textContent = remote?.status === "applied" ? `S3 已确认 v${remote.revision}` : `等待 S3 确认 v${remote?.revision ?? "—"}`;
-        document.getElementById("cadenceReadings").innerHTML = selected ? `<div class="station-reading"><span>S3 实际采样周期</span><b>${reporting.sample_interval_ms ? (reporting.sample_interval_ms / 1000).toFixed(1) + " 秒" : "—"}</b><small>设备最近一次上报</small></div><div class="station-reading"><span>S3 实际上报周期</span><b>${reporting.report_interval_ms ? (reporting.report_interval_ms / 1000).toFixed(1) + " 秒" : "—"}</b><small>${reporting.adaptive_fast ? "设备本地风险快档" : "设备本地常规档"}</small></div><div class="station-reading"><span>常规档目标周期</span><b>${remote?.normal_interval_sec ?? selected.intervals?.normal_interval_sec ?? "—"} 秒</b><small>${esc(remote?.sources?.normal_interval_sec || "继承配置")} · 配置 v${remote?.revision ?? "—"}</small></div><div class="station-reading"><span>风险档目标周期</span><b>${remote?.fast_interval_sec ?? selected.intervals?.fast_interval_sec ?? "—"} 秒</b><small>采样与上报联动</small></div><div class="station-reading"><span>天气预测周期策略 · ${esc(cadenceMode)}</span><b>${esc(cadenceStatus)}</b><small>${expectedNodes ? `有效预测节点 ${readyNodes}/${expectedNodes} · ` : ""}${esc(cadenceAck)}${cadenceReason ? ` · ${cadenceReason}` : ""}</small></div>` : '<div class="station-empty">暂无探杆档案</div>';
+        document.getElementById("cadenceReadings").innerHTML = selected ? `<div class="station-reading"><span>S3 实际采样周期</span><b>${reporting.sample_interval_ms ? (reporting.sample_interval_ms / 1000).toFixed(1) + " 秒" : "—"}</b><small>设备最近一次上报</small></div><div class="station-reading"><span>S3 实际上报周期</span><b>${reporting.report_interval_ms ? (reporting.report_interval_ms / 1000).toFixed(1) + " 秒" : "—"}</b><small>${reporting.adaptive_fast ? "设备本地风险快档" : "设备本地常规档"}</small></div><div class="station-reading"><span>常规档目标周期</span><b>${remote?.normal_interval_sec ?? selected.intervals?.normal_interval_sec ?? "—"} 秒</b><small>${esc(remote?.sources?.normal_interval_sec || "继承配置")} · 配置 v${remote?.revision ?? "—"}</small></div><div class="station-reading"><span>风险档目标周期</span><b>${remote?.fast_interval_sec ?? selected.intervals?.fast_interval_sec ?? "—"} 秒</b><small>采样与上报联动</small></div><div class="station-reading"><span>统一模型周期策略 · ${esc(cadenceMode)}</span><b>${esc(cadenceStatus)}</b><small>${expectedNodes ? `有效预测节点 ${readyNodes}/${expectedNodes} · ` : ""}${esc(cadenceAck)}${cadenceReason ? ` · ${cadenceReason}` : ""}</small></div>` : '<div class="station-empty">暂无探杆档案</div>';
       } catch (error) {
         document.getElementById("probeForecast").innerHTML = `<div class="station-empty">环境数据加载失败：${esc(error.message)}</div>`;
       }
@@ -504,6 +491,18 @@
       backfillStart.max = utcDate(utcToday);
       backfillEnd.max = utcDate(utcToday);
     }
+    document.getElementById("weatherIpButton").addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      showMessage("weatherMessage", "正在查询中心站公网 IP 对应的大致城市；不会自动保存位置。");
+      try {
+        const result = await requestJSON("/api/v1/weather/ip-location");
+        const places = result.results || [];
+        candidateHost.innerHTML = places.length ? places.map(place => `<button class="station-weather-candidate" type="button" data-lat="${Number(place.latitude)}" data-lon="${Number(place.longitude)}"><b>${esc(place.name)}</b><span>${esc([place.admin1, place.country].filter(Boolean).join(" · "))}</span><small>${Number(place.latitude).toFixed(4)}, ${Number(place.longitude).toFixed(4)} · ${esc(place.timezone || "")}</small></button>`).join("") : '<div class="station-empty">IP 推荐没有找到匹配地点；可手动搜索城市或使用浏览器定位。</div>';
+        showMessage("weatherMessage", places.length ? `IP 粗略位置：${result.place_hint || "未知地区"}。请选择候选并确认，坐标不会自动保存。` : "没有可用候选。", !places.length);
+      } catch (error) { showMessage("weatherMessage", error.message, true); }
+      finally { button.disabled = false; }
+    });
     const locateButton = document.getElementById("weatherLocateButton");
     locateButton.addEventListener("click", () => {
       const geolocation = navigator.geolocation;

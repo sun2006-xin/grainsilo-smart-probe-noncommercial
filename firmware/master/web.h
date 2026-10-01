@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "gs_proto.h"
 #include "grain_silo_forecast.h"
+#include "unified_forecast_model.h"
 
 /* 单节点最近一次轮询结果（web 页面 + 快照上报共用） */
 typedef struct {
@@ -18,8 +19,9 @@ typedef struct {
     gs_channel_t ch[GS_CH_MAX];
     uint8_t  nch;
     bool     valid;
-    uint32_t sampled_at_ms;
-    uint32_t sample_boot_id;
+    bool     trusted;           /* validated payload from registered node */
+    uint32_t sampled_at_ms;     /* 本节点最近一次有效样本的 S3 单调时钟 */
+    uint32_t sample_boot_id;    /* 区分 S3 重启前后的样本序号 */
     uint32_t sample_seq;
     uint8_t  last_wire_error;   /* 最近一次已验收的节点协议错误；不属于测量值 */
     uint32_t wire_error_count;  /* 当前 S3 启动周期内累计次数 */
@@ -29,7 +31,8 @@ typedef struct {
 extern uint8_t  s_nodeCount;    /* main.ino 定义 */
 extern SnapNode g_snap[];       /* main.ino 定义，NODE_MAX 个 */
 extern uint32_t s_last_sample_ms; /* 最近一次有效样本的本地时间 */
-extern gs_air_forecast_t g_forecasts[];
+extern gs_unified_forecast_t g_unified_forecasts[];
+extern gs_unified_model_t g_unified_model;
 extern uint32_t g_sample_interval_ms;
 extern uint32_t g_report_interval_ms;
 extern bool g_adaptive_fast;

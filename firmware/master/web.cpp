@@ -11,6 +11,7 @@
 #include "web.h"
 #include <Arduino.h>
 #include <WebServer.h>
+#include <esp_timer.h>
 #include "mode.h"
 #include "alarm.h"
 #include "net.h"
@@ -26,22 +27,41 @@ static const char *sensorName(uint8_t t)
     }
 }
 
-static String forecastJson(const gs_air_forecast_t &forecast)
+static const char *forecastStatusName(gs_unified_status_t status)
+{
+    switch (status) {
+    case GS_UF_READY: return "ready";
+    case GS_UF_CANDIDATE: return "candidate";
+    case GS_UF_BASELINE: return "baseline";
+    case GS_UF_STALE: return "stale";
+    default: return "unavailable";
+    }
+}
+
+static String forecastJson(const gs_unified_forecast_t &forecast)
 {
     String json;
-    json.reserve(320);
+            json.reserve(760);
     json = "{\"status\":\"";
-    json += forecast.status == GS_FORECAST_READY ? "ready" :
-            forecast.status == GS_FORECAST_STALE ? "stale" : "warming_up";
-    json += "\",\"sample_count\":";
-    json += forecast.sample_count;
-    json += ",\"span_s\":";
-    json += forecast.span_seconds;
+    json += forecastStatusName(forecast.status);
+    json += "\",\"model_version\":";
+    json += forecast.model_version;
+    json += ",\"validated_mask\":";
+    json += forecast.validated_mask;
+    json += ",\"peer_count\":";
+    json += forecast.peer_count;
+    json += ",\"weather_used\":";
+    json += forecast.weather_used ? "true" : "false";
+    json += ",\"latest_age_ms\":";
+    const uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000u;
+    json += (unsigned long)(forecast.latest_timestamp_ms <= now_ms ?
+        now_ms - forecast.latest_timestamp_ms : 0u);
     json += ",\"points\":[";
-    if (forecast.status == GS_FORECAST_READY) {
+    if (forecast.status == GS_UF_READY || forecast.status == GS_UF_CANDIDATE ||
+        forecast.status == GS_UF_BASELINE) {
         bool first = true;
-        for (uint8_t i = 0u; i < GS_FORECAST_HORIZON_COUNT; ++i) {
-            const gs_air_forecast_point_t &point = forecast.points[i];
+        for (uint8_t i = 0u; i < GS_UF_HORIZON_COUNT; ++i) {
+            const gs_unified_forecast_point_t &point = forecast.points[i];
             if (!point.valid) continue;
             if (!first) json += ",";
             json += "{\"hour\":";
@@ -50,10 +70,16 @@ static String forecastJson(const gs_air_forecast_t &forecast)
             json += String(point.temperature_c, 2);
             json += ",\"rh\":";
             json += String(point.relative_humidity_pct, 2);
-            json += ",\"history_span_s\":";
-            json += point.history_span_seconds;
-            json += ",\"sample_count\":";
-            json += point.history_sample_count;
+            json += ",\"candidate_available\":";
+            json += point.candidate_available ? "true" : "false";
+            json += ",\"candidate_temp\":";
+            json += String(point.candidate_temperature_c, 2);
+            json += ",\"candidate_rh\":";
+            json += String(point.candidate_relative_humidity_pct, 2);
+            json += ",\"temperature_validated\":";
+            json += point.temperature_validated ? "true" : "false";
+            json += ",\"rh_validated\":";
+            json += point.rh_validated ? "true" : "false";
             json += "}";
             first = false;
         }
@@ -93,6 +119,10 @@ static String statusJson(void)
     s += remote_cfg ? (unsigned long)remote_cfg->fastIntervalMs : 0ul;
     s += ",\"remote_config_revision\":";
     s += (unsigned long)alarm_remote_config_revision();
+    s += ",\"forecast_model_version\":";
+    s += (unsigned long)g_unified_model.version;
+    s += ",\"forecast_validated_mask\":";
+    s += (unsigned)g_unified_model.validated_mask;
     s += ",\"report_queue_replacements\":";
     s += (unsigned long)g_report_queue_replacements;
     s += ",\"rssi\":";
@@ -142,7 +172,7 @@ static String statusJson(void)
              String((unsigned long)(millis() - sn->last_wire_error_at_ms)) :
              String("null");
         s += ",\"forecast\":";
-        s += forecastJson(g_forecasts[i]);
+        s += forecastJson(g_unified_forecasts[i]);
         s += "}";
     }
     s += "]}";
@@ -175,7 +205,7 @@ static const char PAGE_HTML[] = R"html(<!DOCTYPE html>
 @media(max-width:760px){.scene-badge{top:7px;right:7px;padding:5px 8px;font-size:10px}.node-inventory{grid-template-columns:1fr}.inventory-card{padding:0 12px 13px}.inventory-head h2{font-size:16px}.inventory-node{padding:12px}}
 </style>
 <style>
-.node-forecast{margin:0 0 18px;padding:14px;border:1px solid #dcebe3;border-radius:10px;background:linear-gradient(135deg,#f5faf7,#fff)}.node-forecast-head{display:flex;align-items:center;justify-content:space-between;gap:10px;color:#28584e}.node-forecast-head span{padding:4px 8px;border-radius:999px;background:#e5f3eb;color:#37745d;font-size:11px}.node-forecast p{margin:7px 0 10px;color:#71847c;font-size:11px;line-height:1.5}.node-forecast-points{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.node-forecast-points>div{display:grid;gap:3px;padding:9px;border-radius:8px;background:#eef6f1}.node-forecast-points small,.node-forecast-points span{color:#70827b;font-size:10px}.node-forecast-points b{color:#17685d;font-size:15px}.node-forecast-points>span{grid-column:1/-1;padding:4px 0;line-height:1.5}
+.node-forecast{margin:0 0 18px;padding:14px;border:1px solid #dcebe3;border-radius:10px;background:linear-gradient(135deg,#f5faf7,#fff)}.node-forecast-head{display:flex;align-items:center;justify-content:space-between;gap:10px;color:#28584e}.node-forecast-head span{padding:4px 8px;border-radius:999px;background:#e5f3eb;color:#37745d;font-size:11px}.node-forecast p{margin:7px 0 10px;color:#71847c;font-size:11px;line-height:1.5}.node-forecast-points{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.node-forecast-points>div{display:grid;gap:3px;padding:9px;border-radius:8px;background:#eef6f1}.node-forecast-points small,.node-forecast-points span{color:#70827b;font-size:10px}.node-forecast-points b{color:#17685d;font-size:15px}.node-forecast-points .candidate-preview{padding:5px 0 0;color:#94651a;font-size:9px;line-height:1.45}.node-forecast-points>span{grid-column:1/-1;padding:4px 0;line-height:1.5}
 @media(max-width:760px){.node-forecast{margin-bottom:14px;padding:11px}.node-forecast-points{gap:5px}.node-forecast-points>div{padding:7px}.node-forecast-points b{font-size:13px}}
 .home-readings{margin:0 0 16px;padding:17px 20px}.home-readings-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:13px}.home-readings-head h2{margin:0;color:#29463f;font-size:17px}.home-readings-head p{margin:4px 0 0;color:#73847f;font-size:11px}.home-readings-head a{color:#0c685f;font-size:12px;font-weight:600;text-decoration:none}.home-readings-head a:hover{text-decoration:underline}.home-node-list{display:grid;gap:8px}.home-node-row{display:grid;grid-template-columns:minmax(130px,1.2fr) minmax(95px,.8fr) minmax(105px,.9fr) auto;align-items:center;gap:14px;padding:10px 13px;border:1px solid #e5eee9;border-radius:9px;background:#f8fbf9;color:#344c46;text-decoration:none;transition:background .15s,border-color .15s}.home-node-row:hover{border-color:#b8d9ca;background:#f0f8f3}.home-node-identity b,.home-node-value b{display:block;color:#17685d;font-size:15px;font-variant-numeric:tabular-nums}.home-node-identity small,.home-node-value small{display:block;margin-top:3px;color:#73847f;font-size:11px}.home-node-value b{color:#29463f}.home-node-row .badge{justify-self:end}.home-node-empty{padding:16px;border-radius:9px;background:#f7faf8;color:#73847f;line-height:1.6}
 @media(max-width:760px){.home-readings{padding:13px}.home-readings-head h2{font-size:15px}.home-node-row{grid-template-columns:minmax(95px,1fr) minmax(78px,auto) minmax(86px,auto);gap:8px;padding:9px}.home-node-row .badge{grid-column:1/-1;justify-self:start}.home-node-identity b,.home-node-value b{font-size:13px}}
@@ -210,7 +240,7 @@ static const char PAGE_HTML[] = R"html(<!DOCTYPE html>
 <header class="node-head"><div class="node-heading"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h3m2 0h3"/></svg><h2>节点测量数据</h2></div><div class="pager"><button class="icon-button" id="prevNode" type="button" aria-label="上一个节点">‹</button><span id="nodePage">节点 0 / 0</span><button class="icon-button" id="nextNode" type="button" aria-label="下一个节点">›</button></div></header>
 <div class="node-layout"><div class="node-data"><div class="identity-grid"><div class="identity-item"><span>节点地址</span><b id="nodeAddr">等待节点</b></div><div class="identity-item"><span>传感器型号</span><b id="sensorType">—</b></div><div class="identity-item"><span>采样时间</span><b id="nodeSampleTime">等待数据</b></div></div>
 <div class="readings"><div class="reading" id="tempReading"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 14.8V5a3 3 0 0 0-6 0v9.8a5 5 0 1 0 6 0Z"/><path d="M11 8v9"/></svg><div><span class="reading-label">温度</span><strong id="nodeTemp">— <small>°C</small></strong></div></div><div class="reading" id="rhReading"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3C9 7.4 5.5 11 5.5 15a6.5 6.5 0 0 0 13 0c0-4-3.5-7.6-6.5-12Z"/><path d="M9 16a3 3 0 0 0 3 3"/></svg><div><span class="reading-label">相对湿度</span><strong id="nodeRh">— <small>%RH</small></strong></div></div></div>
-<section class="node-forecast" aria-live="polite"><div class="node-forecast-head"><b>探杆周围空气趋势参考</b><span id="nodeForecastStatus">等待数据</span></div><p id="nodeForecastMeta">仅表示该测点周围空气温度与相对湿度，不是整堆粮温或粮食含水率。</p><div id="nodeForecastPoints" class="node-forecast-points"><span>历史不足时不外推</span></div></section>
+<section class="node-forecast" aria-live="polite"><div class="node-forecast-head"><b>统一温湿度预测</b><span id="nodeForecastStatus">等待数据</span></div><p id="nodeForecastMeta">电脑端训练统一模型；S3 与电脑端使用同一版本、参数和推理公式。未通过留出验证的候选值仅供观察，不参与告警或采样控制。预测对象是探杆周围空气，不是粮食含水率或整仓实测温度场。</p><div id="nodeForecastPoints" class="node-forecast-points"><span>收到有效节点实测后立即显示持续性基线。</span></div></section>
 <div class="actions"><form method="post" action="/api/report"><button class="button" type="submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v4h14v-4" stroke-linecap="round" stroke-linejoin="round"/></svg>立即上报</button></form><button class="button secondary" id="refreshNow" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7v5h-5M4 17v-5h5" stroke-linecap="round" stroke-linejoin="round"/><path d="M6.2 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 11.8-3" stroke-linecap="round"/></svg>刷新数据</button></div>
 </div></div>
 <details class="all-nodes" id="allNodes"><summary>全部节点数据（<span id="allNodeCount">0</span> 个节点）</summary><div class="table-wrap"><table><thead><tr><th>地址</th><th>传感器</th><th>温度</th><th>湿度</th><th>状态</th></tr></thead><tbody id="nodes"><tr><td colspan="5">正在读取节点…</td></tr></tbody></table></div></details>
@@ -218,8 +248,8 @@ static const char PAGE_HTML[] = R"html(<!DOCTYPE html>
  </div>
 <div class="page-view" id="settings" data-page="settings" hidden>
 <section class="settings-stack" aria-label="设备配置">
-<details class="card settings" id="wifiSettings" open><summary><svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9a14 14 0 0 1 18 0M6 12a9 9 0 0 1 12 0m-9 3a4 4 0 0 1 6 0m-3 4h.01" stroke-linecap="round"/></svg>Wi-Fi 网络与中心站</summary><div class="settings-body"><div class="settings-network-state"><span>当前 Wi-Fi 与中心站状态</span><b id="settingsWifiState">读取中</b><small>已保存的密码不会回显；SSID 和密码都留空即可只更新电脑中心站地址。</small></div><p class="settings-note">中心站地址填写电脑局域网 IPv4（如 192.0.2.10）。更改 Wi-Fi 名称/密码后需重启；仅更新地址也请重启以重新载入。</p>
-<form method="post" action="/api/wifi"><div class="field"><label for="wifiSsid">Wi-Fi 名称（SSID，可留空保留现有）</label><input id="wifiSsid" name="ssid" autocomplete="off"></div><div class="field"><label for="wifiPass">Wi-Fi 密码（留空保留现有）</label><input id="wifiPass" name="pass" type="password" autocomplete="new-password"></div><div class="field"><label for="stationHost">电脑中心站 IPv4 地址</label><input id="stationHost" name="host" placeholder="例如 192.0.2.10" inputmode="decimal"></div><button class="button" type="submit">保存网络配置</button></form></div></details>
+<details class="card settings" id="wifiSettings" open><summary><svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9a14 14 0 0 1 18 0M6 12a9 9 0 0 1 12 0m-9 3a4 4 0 0 1 6 0m-3 4h.01" stroke-linecap="round"/></svg>Wi-Fi 网络与中心站</summary><div class="settings-body"><div class="settings-network-state"><span>当前 Wi-Fi 与中心站状态</span><b id="settingsWifiState">读取中</b><small>已保存的密码不会回显；SSID 和密码都留空即可只更新电脑中心站地址。</small></div><p class="settings-note">中心站地址填写电脑局域网 IPv4（如 192.168.1.12）。更改 Wi-Fi 名称/密码后需重启；仅更新地址也请重启以重新载入。</p>
+<form method="post" action="/api/wifi"><div class="field"><label for="wifiSsid">Wi-Fi 名称（SSID，可留空保留现有）</label><input id="wifiSsid" name="ssid" autocomplete="off"></div><div class="field"><label for="wifiPass">Wi-Fi 密码（留空保留现有）</label><input id="wifiPass" name="pass" type="password" autocomplete="new-password"></div><div class="field"><label for="stationHost">电脑中心站 IPv4 地址</label><input id="stationHost" name="host" placeholder="例如 192.168.1.12" inputmode="decimal"></div><button class="button" type="submit">保存网络配置</button></form></div></details>
 <details class="card settings" id="thresholds"><summary><svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Zm-8 12a2 2 0 0 0 4 0" stroke-linecap="round" stroke-linejoin="round"/></svg>告警阈值与采样策略</summary><div class="settings-body"><p class="settings-note">留空的项目不修改；温度单位 ℃，相对湿度单位 %RH，周期单位秒。</p><form method="post" action="/api/th"><div class="field"><label for="thHigh">高温阈值 TH（℃）</label><input id="thHigh" name="th" inputmode="decimal" placeholder="30.0"></div><div class="field"><label for="thLow">低温阈值 TL（℃）</label><input id="thLow" name="tl" inputmode="decimal" placeholder="-5.0"></div><div class="field"><label for="rhHigh">高湿阈值 RH（%）</label><input id="rhHigh" name="rh" inputmode="decimal" placeholder="70.0"></div><div class="field"><label for="pollSec">常规采样周期（秒）</label><input id="pollSec" name="poll" inputmode="numeric" placeholder="900"></div><div class="field"><label for="fastSec">告警快速采样周期（秒）</label><input id="fastSec" name="fast" inputmode="numeric" placeholder="60"></div><button class="button" type="submit">保存阈值设置</button></form></div></details>
 <details class="card settings" id="operationMode"><summary><svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="white"/><circle cx="15" cy="12" r="2" fill="white"/><circle cx="11" cy="18" r="2" fill="white"/></svg>设备工作模式</summary><div class="settings-body"><p class="settings-note">当前模式：<b id="settingsModeValue">读取中</b>。调试模式保持 Wi-Fi 常开；低功耗模式使用 Deep Sleep。切换后设备会重启。</p><form method="post" action="/api/mode"><div class="field"><label for="runMode">设备工作模式</label><select id="runMode" name="mode"><option value="debug">调试模式（Wi-Fi 常开）</option><option value="lowpower">低功耗模式（Deep Sleep）</option></select></div><button class="button" type="submit">切换并重启</button></form></div></details>
 </section></div>
@@ -258,16 +288,12 @@ function renderNodeForecast(node){
  var status=document.getElementById('nodeForecastStatus'),meta=document.getElementById('nodeForecastMeta'),host=document.getElementById('nodeForecastPoints');
  if(nodeIsStale(node)){status.textContent='节点实测数据陈旧';meta.textContent='该节点超过采样周期阈值未收到新样本；旧读数仅供追溯，不作为当前预测依据。';host.innerHTML='<span>等待节点恢复采样后再显示预测。</span>';return}
  var forecast=node&&node.forecast?node.forecast:null;
- if(!forecast){status.textContent='等待数据';meta.textContent='仅用本节点有效实测温度与相对湿度外推；不是粮食含水率预测。';host.innerHTML='<span>尚无有效节点预测</span>';return}
- if(forecast.status!=='ready'){
-  status.textContent=forecast.status==='stale'?'样本已过期':'模型预热中';
-  meta.textContent='已保存 '+Number(forecast.sample_count||0)+' 个半小时历史点 · 覆盖 '+Number(forecast.span_s||0)+' 秒；最新趋势最多保留约 25 小时。';
-  host.innerHTML='<span>每个预测跨度至少需要两倍的历史：+1h 需 2h，+3h 需 6h，+6h 需 12h。</span>';return;
- }
- var points=forecast.points||[];
- status.textContent=points.length<3?'部分趋势参考':'长历史趋势参考';
- meta.textContent='本节点 '+Number(forecast.sample_count)+' 个半小时点，覆盖 '+Number(forecast.span_s)+' 秒；各预测点单独要求两倍历史覆盖，不是天气驱动或整堆粮温预测。';
- host.innerHTML=points.map(function(point){return '<div><small>+'+Number(point.hour)+' 小时</small><b>'+Number(point.temp).toFixed(1)+' °C</b><span>'+Number(point.rh).toFixed(1)+' %RH</span></div>'}).join('')||'<span>预测点暂不可用</span>';
+ if(!forecast){status.textContent='等待数据';meta.textContent='尚未收到有效节点实测。';host.innerHTML='<span>收到有效节点样本后立即生成基线。</span>';return}
+ var statusText=forecast.status==='ready'?'统一模型·含已验证输出':forecast.status==='candidate'?'统一模型候选·观察中':forecast.status==='baseline'?'持续性基线·无需预热':forecast.status==='stale'?'节点数据过期':'等待有效节点数据';
+ status.textContent=statusText+' · v'+Number(forecast.model_version||0);
+ var points=forecast.points||[],peerCount=Number(forecast.peer_count||0),weather=forecast.weather_used?'已纳入当前网格天气':'当前无可用天气';
+ meta.textContent='电脑端与 S3 共用同一模型参数及推理公式；同仓有效参考节点 '+peerCount+' 个，'+weather+'。采用值仅使用已验证输出，其他通道回退持续性基线；模型候选观察值不参与告警或采样控制。';
+ host.innerHTML=points.map(function(point){var t=point.temperature_validated?'已验证模型':'持续性基线回退',h=point.rh_validated?'已验证模型':'持续性基线回退';var preview=point.candidate_available?'<span class="candidate-preview">模型候选观察：'+Number(point.candidate_temp).toFixed(1)+' °C / '+Number(point.candidate_rh).toFixed(1)+' %RH · 未验证，不参与控制</span>':'<span class="candidate-preview">统一模型尚未就绪</span>';return '<div><small>+'+Number(point.hour)+' 小时</small><b>采用 '+Number(point.temp).toFixed(1)+' °C</b><span>温度：'+t+'</span><b>'+Number(point.rh).toFixed(1)+' %RH</b><span>湿度：'+h+'</span>'+preview+'</div>'}).join('')||'<span>节点数据陈旧或无效，暂不预测。</span>';
 }
 /* NODE_INVENTORY_BEGIN */
 function renderNodeInventory(rows) {

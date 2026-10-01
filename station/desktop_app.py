@@ -54,6 +54,7 @@ class StationRuntime:
         self.httpd = httpd
         self.thread = thread
         thread.start()
+        self.server_module.schedule_all_unified_forecast_training()
         if self.start_weather_worker:
             if self.weather_thread is None or not self.weather_thread.is_alive():
                 self.weather_thread = threading.Thread(
@@ -215,7 +216,7 @@ def self_check():
             base = runtime.start()
             with urllib.request.urlopen(base + "api/v1/health", timeout=5) as response:
                 health = json.loads(response.read().decode("utf-8"))
-            if not health.get("ok") or int(health.get("schema_version", 0)) < 9:
+            if not health.get("ok") or int(health.get("schema_version", 0)) < 10:
                 return 1
             with urllib.request.urlopen(base + "index.html", timeout=5) as response:
                 page = response.read().decode("utf-8")

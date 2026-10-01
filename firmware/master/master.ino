@@ -45,8 +45,11 @@ static uint8_t s_rx[GS_FRAME_MAX_LEN];
 static uint16_t s_rx_len;
 static al_time_us_t s_rx_last_us;
 static bool s_web_enabled;
+/* Short input history for shared-model features only; it is not a second model. */
 static gs_forecast_history_t s_forecast_history[GRAIN_SILO_NODE_MAX];
-static uint64_t s_forecast_last_sample_ms[GRAIN_SILO_NODE_MAX];
+static gs_unified_air_reading_t s_unified_weather;
+static uint32_t s_unified_weather_received_ms;
+static uint32_t s_unified_weather_age_at_receive_ms;
 static QueueHandle_t s_report_queue;
 static bool s_report_task_ready;
 static bool s_adaptive_fast = true;
@@ -70,7 +73,8 @@ typedef struct {
 uint8_t s_nodeCount;
 SnapNode g_snap[GRAIN_SILO_NODE_MAX];
 uint32_t s_last_sample_ms;
-gs_air_forecast_t g_forecasts[GRAIN_SILO_NODE_MAX];
+gs_unified_model_t g_unified_model;
+gs_unified_forecast_t g_unified_forecasts[GRAIN_SILO_NODE_MAX];
 uint32_t g_sample_interval_ms = 10000u;
 uint32_t g_report_interval_ms = 10000u;
 bool g_adaptive_fast = true;
@@ -123,6 +127,152 @@ static bool node_channel_value(const SnapNode *node, uint8_t channel,
     return false;
 }
 
+typedef struct {
+    uint16_t schema;
+    gs_unified_model_t model;
+} grainsilo_unified_model_record_t;
+
+static void flatten_unified_model(const gs_unified_model_t *model,
+                                  float values[GS_UF_PARAMETER_COUNT])
+{
+    size_t cursor = 0u;
+    for (uint8_t i = 0u; i < GS_UF_FEATURE_COUNT; ++i)
+        values[cursor++] = model->input_mean[i];
+    for (uint8_t i = 0u; i < GS_UF_FEATURE_COUNT; ++i)
+        values[cursor++] = model->input_scale[i];
+    for (uint8_t i = 0u; i < GS_UF_HIDDEN1_COUNT; ++i)
+        for (uint8_t j = 0u; j < GS_UF_FEATURE_COUNT; ++j)
+            values[cursor++] = model->w1[i][j];
+    for (uint8_t i = 0u; i < GS_UF_HIDDEN1_COUNT; ++i)
+        values[cursor++] = model->b1[i];
+    for (uint8_t i = 0u; i < GS_UF_HIDDEN2_COUNT; ++i)
+        for (uint8_t j = 0u; j < GS_UF_HIDDEN1_COUNT; ++j)
+            values[cursor++] = model->w2[i][j];
+    for (uint8_t i = 0u; i < GS_UF_HIDDEN2_COUNT; ++i)
+        values[cursor++] = model->b2[i];
+    for (uint8_t i = 0u; i < GS_UF_OUTPUT_COUNT; ++i)
+        for (uint8_t j = 0u; j < GS_UF_HIDDEN2_COUNT; ++j)
+            values[cursor++] = model->w3[i][j];
+    for (uint8_t i = 0u; i < GS_UF_OUTPUT_COUNT; ++i)
+        values[cursor++] = model->b3[i];
+    for (uint8_t i = 0u; i < GS_UF_OUTPUT_COUNT; ++i)
+        values[cursor++] = model->output_scale[i];
+}
+
+static bool restore_unified_model(void)
+{
+    if (s_preferences.getBytesLength("uf_model") !=
+        sizeof(grainsilo_unified_model_record_t)) return false;
+    grainsilo_unified_model_record_t record;
+    memset(&record, 0, sizeof(record));
+    if (s_preferences.getBytes("uf_model", &record, sizeof(record)) !=
+        sizeof(record) || record.schema != 1u) return false;
+    float parameters[GS_UF_PARAMETER_COUNT];
+    flatten_unified_model(&record.model, parameters);
+    gs_unified_model_t restored;
+    if (!gs_unified_model_load(&restored, record.model.version,
+            record.model.validated_mask, parameters, GS_UF_PARAMETER_COUNT))
+        return false;
+    g_unified_model = restored;
+    Serial.printf("[FORECAST] restored model v%lu mask=0x%02X from NVS\n",
+                  (unsigned long)restored.version,
+                  (unsigned)restored.validated_mask);
+    return true;
+}
+
+static bool persist_unified_model(const gs_unified_model_t *model)
+{
+    if (model == NULL || model->version == 0u) return false;
+    grainsilo_unified_model_record_t record;
+    memset(&record, 0, sizeof(record));
+    record.schema = 1u;
+    record.model = *model;
+    return s_preferences.putBytes("uf_model", &record, sizeof(record)) ==
+           sizeof(record);
+}
+
+static bool unified_forecast_crosses(const gs_unified_forecast_t *forecast,
+                                     const gs_air_thresholds_t *thresholds)
+{
+    if (forecast == NULL || thresholds == NULL ||
+        forecast->status != GS_UF_READY) return false;
+    for (uint8_t i = 0u; i < GS_UF_HORIZON_COUNT; ++i) {
+        const gs_unified_forecast_point_t *point = &forecast->points[i];
+        if (!point->valid) continue;
+        if (point->temperature_validated &&
+            (point->temperature_c < thresholds->temperature_low_c ||
+             point->temperature_c > thresholds->temperature_high_c)) return true;
+        if (point->rh_validated &&
+            ((thresholds->humidity_low_pct > 0.0f &&
+              point->relative_humidity_pct < thresholds->humidity_low_pct) ||
+             point->relative_humidity_pct > thresholds->humidity_high_pct)) return true;
+    }
+    return false;
+}
+
+static void update_unified_forecast(uint8_t index, uint64_t now_ms)
+{
+    if (index >= s_nodeCount || index >= GRAIN_SILO_NODE_MAX) return;
+    const SnapNode *node = &g_snap[index];
+    gs_unified_air_reading_t current = {0};
+    float temperature_c, humidity_pct;
+    if (node->valid && node->trusted && node->status == 0u &&
+        node_channel_value(node, GS_CH_TEMP, &temperature_c) &&
+        node_channel_value(node, GS_CH_RH, &humidity_pct)) {
+        const uint32_t age_ms = (uint32_t)(millis() - node->sampled_at_ms);
+        current.valid = true;
+        current.timestamp_ms = age_ms <= now_ms ? now_ms - age_ms : 0u;
+        current.temperature_c = temperature_c;
+        current.relative_humidity_pct = humidity_pct;
+    }
+
+    gs_unified_air_reading_t history[GS_FORECAST_SAMPLE_CAPACITY];
+    size_t history_count = 0u;
+    const gs_forecast_history_t *source = &s_forecast_history[index];
+    const size_t source_count = source->count > GS_FORECAST_SAMPLE_CAPACITY ?
+        GS_FORECAST_SAMPLE_CAPACITY : source->count;
+    for (size_t i = 0u; i < source_count; ++i) {
+        history[history_count].valid = true;
+        history[history_count].timestamp_ms = source->samples[i].timestamp_ms;
+        history[history_count].temperature_c = source->samples[i].temperature_c;
+        history[history_count].relative_humidity_pct =
+            source->samples[i].relative_humidity_pct;
+        ++history_count;
+    }
+
+    gs_unified_air_reading_t peers[GRAIN_SILO_NODE_MAX];
+    size_t peer_count = 0u;
+    for (uint8_t i = 0u; i < s_nodeCount && peer_count < GRAIN_SILO_NODE_MAX; ++i) {
+        const SnapNode *peer = &g_snap[i];
+        if (i == index || !peer->valid || !peer->trusted ||
+            peer->status != 0u) continue;
+        float peer_temp, peer_rh;
+        if (!node_channel_value(peer, GS_CH_TEMP, &peer_temp) ||
+            !node_channel_value(peer, GS_CH_RH, &peer_rh)) continue;
+        const uint32_t age_ms = (uint32_t)(millis() - peer->sampled_at_ms);
+        peers[peer_count].valid = true;
+        peers[peer_count].timestamp_ms = age_ms <= now_ms ? now_ms - age_ms : 0u;
+        peers[peer_count].temperature_c = peer_temp;
+        peers[peer_count].relative_humidity_pct = peer_rh;
+        ++peer_count;
+    }
+
+    gs_unified_air_reading_t weather = s_unified_weather;
+    uint64_t weather_age_ms = UINT64_MAX;
+    if (weather.valid && s_unified_weather_received_ms != 0u) {
+        weather_age_ms = (uint64_t)s_unified_weather_age_at_receive_ms +
+            (uint32_t)(millis() - s_unified_weather_received_ms);
+        weather.timestamp_ms = weather_age_ms <= now_ms ?
+            now_ms - weather_age_ms : 0u;
+    } else {
+        weather.valid = false;
+    }
+    gs_unified_forecast_predict(
+        &g_unified_model, &current, history, history_count,
+        peers, peer_count, &weather, weather_age_ms, now_ms,
+        forecast_max_age_ms(), &g_unified_forecasts[index]);
+}
+
 static void update_adaptive_policy(uint64_t now_ms)
 {
     const alarm_cfg_t *cfg = alarm_get_cfg();
@@ -144,23 +294,27 @@ static void update_adaptive_policy(uint64_t now_ms)
         const bool have_temp = node_channel_value(node, GS_CH_TEMP,
                                                   &temperature_c);
         const bool have_rh = node_channel_value(node, GS_CH_RH, &humidity_pct);
-        if (!have_temp || !have_rh || s_forecast_last_sample_ms[i] == 0u ||
-            now_ms < s_forecast_last_sample_ms[i] ||
-            now_ms - s_forecast_last_sample_ms[i] > forecast_max_age_ms()) {
+        const uint64_t sample_age_ms = (uint32_t)(millis() - node->sampled_at_ms);
+        if (!node->trusted || !have_temp || !have_rh ||
+            sample_age_ms > forecast_max_age_ms()) {
             all_ready = false;
         }
-        if (have_temp && (temperature_c > thresholds.temperature_high_c ||
+        if (node->trusted && have_temp &&
+            (temperature_c > thresholds.temperature_high_c ||
                           temperature_c < thresholds.temperature_low_c))
             measured_risk = true;
-        if (have_rh && ((thresholds.humidity_high_pct > 0.0f &&
+        if (node->trusted && have_rh &&
+            ((thresholds.humidity_high_pct > 0.0f &&
                          humidity_pct > thresholds.humidity_high_pct) ||
                         (thresholds.humidity_low_pct > 0.0f &&
                          humidity_pct < thresholds.humidity_low_pct)))
             measured_risk = true;
-        if (g_forecasts[i].status != GS_FORECAST_READY) {
+        if (!g_unified_model.version ||
+            (g_unified_model.validated_mask & 0x03u) != 0x03u ||
+            g_unified_forecasts[i].status != GS_UF_READY) {
             all_ready = false;
-        } else if (gs_forecast_crosses_threshold(&g_forecasts[i],
-                                                  &thresholds)) {
+        }
+        if (unified_forecast_crosses(&g_unified_forecasts[i], &thresholds)) {
             prediction_risk = true;
         }
     }
@@ -212,6 +366,7 @@ static void cache_sample(uint8_t addr, const gs_sample_t *sample, bool trusted)
     node->last_wire_error_at_ms = last_wire_error_at_ms;
     node->stype = sample->sensor_type;
     node->status = sample->status;
+    node->trusted = trusted;
     for (uint8_t i = 0u; i < sample->channel_count &&
                         i < GS_CODEC_CHANNEL_CAPACITY && i < GS_CH_MAX; ++i) {
         const gs_sample_channel_t *source = &sample->channels[i];
@@ -230,13 +385,13 @@ static void cache_sample(uint8_t addr, const gs_sample_t *sample, bool trusted)
 
     const uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000u;
     float temperature_c, humidity_pct;
-    if (trusted && node_channel_value(node, GS_CH_TEMP, &temperature_c) &&
-        node_channel_value(node, GS_CH_RH, &humidity_pct) &&
-        gs_forecast_add_sample(&s_forecast_history[index], now_ms,
-                               temperature_c, humidity_pct))
-        s_forecast_last_sample_ms[index] = now_ms;
-    gs_forecast_predict(&s_forecast_history[index], now_ms,
-                        forecast_max_age_ms(), &g_forecasts[index]);
+    if (trusted && node->status == 0u &&
+        node_channel_value(node, GS_CH_TEMP, &temperature_c) &&
+        node_channel_value(node, GS_CH_RH, &humidity_pct)) {
+        (void)gs_forecast_add_sample(&s_forecast_history[index], now_ms,
+                                     temperature_c, humidity_pct);
+    }
+    update_unified_forecast((uint8_t)index, now_ms);
     update_adaptive_policy(now_ms);
 }
 
@@ -256,7 +411,7 @@ static int build_snapshot_json(char *buffer, size_t capacity)
         "\"alarm\":%d,\"measurement_risk\":%d,\"prediction_risk\":%d,"
         "\"adaptive_fast\":%d,\"sample_interval_ms\":%lu,"
         "\"report_interval_ms\":%lu,\"report_queue_replacements\":%lu,"
-        "\"remote_config_revision\":%lu,"
+        "\"remote_config_revision\":%lu,\"forecast_model_version\":%lu,"
         "\"sample_boot_id\":%lu,\"bat_mv\":%u,\"ts\":0,\"nodes\":[",
         poleUidStr(), mode_get() == MODE_DEBUG ? 1 : 0,
         alarm_is_active() ? 1 : 0, g_measurement_risk ? 1 : 0,
@@ -265,6 +420,7 @@ static int build_snapshot_json(char *buffer, size_t capacity)
         (unsigned long)g_report_interval_ms,
         (unsigned long)g_report_queue_replacements,
         (unsigned long)alarm_remote_config_revision(),
+        (unsigned long)g_unified_model.version,
         (unsigned long)s_sample_boot_id,
         (unsigned)oled_bus_mv());
     if (length < 0 || (size_t)length >= capacity) return -1;
@@ -303,37 +459,43 @@ static int build_snapshot_json(char *buffer, size_t capacity)
         if (written < 0 || (size_t)written >= capacity - (size_t)length)
             return -1;
         length += written;
-        const gs_air_forecast_t *forecast = &g_forecasts[i];
-        const char *status = forecast->status == GS_FORECAST_READY ? "ready" :
-            forecast->status == GS_FORECAST_STALE ? "stale" : "warming_up";
+        const gs_unified_forecast_t *forecast = &g_unified_forecasts[i];
+        const char *status = forecast->status == GS_UF_READY ? "ready" :
+            forecast->status == GS_UF_CANDIDATE ? "candidate" :
+            forecast->status == GS_UF_BASELINE ? "baseline" :
+            forecast->status == GS_UF_STALE ? "stale" : "unavailable";
         const int forecast_head = snprintf(
             buffer + length, capacity - (size_t)length,
-            "{\"status\":\"%s\",\"sample_count\":%u,\"span_s\":%lu,"
-            "\"temperature_slope_c_per_h\":%s,\"vapor_pressure_slope_hpa_per_h\":%s,\"points\":[",
-            status, (unsigned)forecast->sample_count,
-            (unsigned long)forecast->span_seconds,
-            forecast->status == GS_FORECAST_READY ?
-                String(forecast->temperature_slope_c_per_hour, 4).c_str() : "null",
-            forecast->status == GS_FORECAST_READY ?
-                String(forecast->vapor_pressure_slope_hpa_per_hour, 4).c_str() : "null");
+            "{\"status\":\"%s\",\"model_version\":%lu,"
+            "\"validated_mask\":%u,\"peer_count\":%u,\"weather_used\":%s,"
+            "\"latest_age_ms\":%lu,\"points\":[",
+            status, (unsigned long)forecast->model_version,
+            (unsigned)forecast->validated_mask, (unsigned)forecast->peer_count,
+            forecast->weather_used ? "true" : "false",
+            (unsigned long)(forecast->latest_timestamp_ms <=
+                (uint64_t)esp_timer_get_time() / 1000u ?
+                (uint64_t)esp_timer_get_time() / 1000u -
+                    forecast->latest_timestamp_ms : 0u));
         if (forecast_head < 0 ||
             (size_t)forecast_head >= capacity - (size_t)length) return -1;
         length += forecast_head;
         bool first_forecast_point = true;
-        if (forecast->status == GS_FORECAST_READY) {
-            for (uint8_t point = 0u; point < GS_FORECAST_HORIZON_COUNT; ++point) {
-                const gs_air_forecast_point_t *p = &forecast->points[point];
+        if (forecast->status == GS_UF_READY ||
+            forecast->status == GS_UF_CANDIDATE ||
+            forecast->status == GS_UF_BASELINE) {
+            for (uint8_t point = 0u; point < GS_UF_HORIZON_COUNT; ++point) {
+                const gs_unified_forecast_point_t *p = &forecast->points[point];
                 if (!p->valid) continue;
                 const String t = String(p->temperature_c, 2);
                 const String rh = String(p->relative_humidity_pct, 2);
                 const int point_len = snprintf(
                     buffer + length, capacity - (size_t)length,
                     "%s{\"hour\":%u,\"temp\":%s,\"rh\":%s,"
-                    "\"history_span_s\":%lu,\"sample_count\":%u}",
+                    "\"temperature_validated\":%s,\"rh_validated\":%s}",
                     first_forecast_point ? "" : ",", (unsigned)p->hour,
                     t.c_str(), rh.c_str(),
-                    (unsigned long)p->history_span_seconds,
-                    (unsigned)p->history_sample_count);
+                    p->temperature_validated ? "true" : "false",
+                    p->rh_validated ? "true" : "false");
                 if (point_len < 0 ||
                     (size_t)point_len >= capacity - (size_t)length) return -1;
                 length += point_len;
@@ -374,7 +536,9 @@ static void report_worker(void *)
             char command[32] = {0};
             net_remote_settings_t settings = {0};
             sent = net_post_snapshot(job.json, command, sizeof(command), &settings);
-            if (sent && settings.present && s_settings_queue != NULL) {
+            if (sent && s_settings_queue != NULL &&
+                (settings.present || settings.forecast_model_present ||
+                 settings.forecast_weather_present)) {
                 (void)xQueueOverwrite(s_settings_queue, &settings);
             }
             if (!job.keep_wifi) net_disconnect();
@@ -388,14 +552,46 @@ static void apply_queued_remote_settings(void)
     if (s_settings_queue == NULL) return;
     net_remote_settings_t settings;
     if (xQueueReceive(s_settings_queue, &settings, 0u) != pdTRUE) return;
-    if (settings.revision <= alarm_remote_config_revision()) return;
-    if (!alarm_apply_remote_config(
-            settings.revision, settings.temp_high_centi, settings.temp_low_centi,
-            settings.rh_high_centi, settings.rh_low_centi,
-            settings.normal_interval_sec, settings.fast_interval_sec)) {
-        Serial.printf("[CONFIG] rejected remote settings revision=%lu\n",
-                      (unsigned long)settings.revision);
-        return;
+    if (settings.forecast_weather_present) {
+        s_unified_weather.valid = true;
+        s_unified_weather.temperature_c = settings.forecast_weather_temperature_c;
+        s_unified_weather.relative_humidity_pct = settings.forecast_weather_rh_pct;
+        s_unified_weather_age_at_receive_ms =
+            settings.forecast_weather_age_sec * 1000u;
+        s_unified_weather_received_ms = millis();
+    }
+    if (settings.forecast_model_present &&
+        settings.forecast_model_version != g_unified_model.version) {
+        gs_unified_model_t candidate;
+        if (gs_unified_model_load(&candidate,
+                settings.forecast_model_version,
+                settings.forecast_validated_mask,
+                settings.forecast_parameters,
+                GS_UF_PARAMETER_COUNT)) {
+            g_unified_model = candidate;
+            if (!persist_unified_model(&candidate))
+                Serial.println("[FORECAST] model active in RAM; NVS save failed");
+            else
+                Serial.printf("[FORECAST] installed shared model v%lu mask=0x%02X\n",
+                              (unsigned long)candidate.version,
+                              (unsigned)candidate.validated_mask);
+            for (uint8_t i = 0u; i < s_nodeCount; ++i)
+                update_unified_forecast(i,
+                    (uint64_t)esp_timer_get_time() / 1000u);
+        } else {
+            Serial.printf("[FORECAST] rejected model payload version=%lu\n",
+                          (unsigned long)settings.forecast_model_version);
+        }
+    }
+    if (settings.present &&
+        settings.revision > alarm_remote_config_revision()) {
+        if (!alarm_apply_remote_config(
+                settings.revision, settings.temp_high_centi, settings.temp_low_centi,
+                settings.rh_high_centi, settings.rh_low_centi,
+                settings.normal_interval_sec, settings.fast_interval_sec)) {
+            Serial.printf("[CONFIG] rejected remote settings revision=%lu\n",
+                          (unsigned long)settings.revision);
+        }
     }
     update_adaptive_policy((uint64_t)esp_timer_get_time() / 1000u);
 }
@@ -604,6 +800,7 @@ void setup(void)
     net_init();
     s_preferences.begin("autolink", false);
     al_journal_init(&s_registry_journal, storage);
+    (void)restore_unified_model();
     if (!restore_registry()) {
         uint64_t network = ((uint64_t)esp_random() << 32) | esp_random();
         if (network == 0u) network = 1u;

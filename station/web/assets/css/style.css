@@ -914,6 +914,7 @@ body { background: var(--ui-bg); color: var(--ui-ink); overflow-x: hidden; }
 .probe-air-forecast select { max-width: 55%; min-height: 34px; padding: 5px 8px; border: 1px solid var(--ui-line); border-radius: 7px; background: #fff; color: var(--fg); font: inherit; }
 .probe-air-note { margin: 7px 0 10px; color: var(--ui-muted); font-size: 10px; line-height: 1.55; }
 .probe-air-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.probe-air-sources.unified { grid-template-columns: 1fr; }
 .probe-air-sources > div { min-width: 0; padding: 9px; border: 1px solid #e2ece6; border-radius: 8px; background: #f7fbf8; }
 .probe-air-sources > div > b { display: block; margin-bottom: 7px; color: #28584e; font-size: 11px; }
 .probe-air-sources > div > span { display: grid; gap: 5px; }
@@ -922,7 +923,9 @@ body { background: var(--ui-bg); color: var(--ui-ink); overflow-x: hidden; }
 .probe-weather-warning { color: #ad3933; font-weight: 700; }
 .probe-air-point { display: grid; grid-template-columns: 37px 1fr auto; align-items: center; gap: 5px; color: #38584e; font-size: 10px; }
 .probe-air-point small, .probe-air-point em { color: var(--ui-muted); font-size: 9px; font-style: normal; }
+.probe-air-point > small:not(:first-child) { grid-column: 2 / -1; }
 .probe-air-point b { font-size: 11px; font-variant-numeric: tabular-nums; }
+.probe-air-point .probe-air-preview { grid-column: 2 / -1; color: #94651a; line-height: 1.45; }
 .probe-air-risk { margin-top: 9px; padding: 8px 9px; border-radius: 7px; background: #eef7f1; color: #327055; font-size: 10px; line-height: 1.5; }
 .probe-air-risk.risk { background: #fff0ee; color: #ad3933; }
 @media (max-width: 760px) { .probe-air-sources { grid-template-columns: 1fr; } }

@@ -36,7 +36,7 @@ API：
     GET  /api/v1/env?hours=24          环境历史（曲线用）
     GET  /api/v1/heatmap?step=0.5      粮堆三维热场插值（IDW，相邻杆节点插值）
     GET  /api/v1/forecast?pile=1&lat=..&lon=..  在线测点的长历史温湿度趋势 + 天气旁证
-    GET  /api/v1/probe-forecast?uid=..&addr=1  单节点 S3 预测 + Station 独立重算
+    GET  /api/v1/probe-forecast?uid=..&addr=1  Station/S3 统一模型预测与同步状态
     GET  /api/v1/actuators             风机/灯光/通风只读能力占位（当前不可控）
     POST /api/v1/crop-emc             来源范围内的作物平衡含水率参考计算
     GET/POST /api/v1/crop-profile     按粮堆读取/保存作物模型选项
@@ -71,6 +71,17 @@ from weather_assisted_forecast import predict_weather_assisted_air_state
 from weather_cadence_policy import (advance_weather_cadence_state,
                                     effective_normal_interval)
 from runtime_paths import resolve_runtime_paths
+from unified_forecast import (MODEL_ID as UNIFIED_FORECAST_MODEL_ID,
+                              MIN_TRAINING_ROWS as UNIFIED_MIN_TRAINING_ROWS,
+                              OUTPUT_NAMES as UNIFIED_OUTPUT_NAMES,
+                              apply_validation_mask,
+                              pack_model_parameters,
+                              predict_unified_forecast,
+                              train_unified_model,
+                              validation_mask as unified_validation_mask)
+from unified_forecast_data import (load_current_weather,
+                                  load_probe_histories,
+                                  load_training_rows)
 
 # Windows 控制台默认 GBK，直接 print 中文会 UnicodeEncodeError 崩溃（曾发生）
 if hasattr(sys.stdout, "reconfigure"):
@@ -93,7 +104,6 @@ LOG_ROOT = _RUNTIME_PATHS["logs"]
 OFFLINE_SEC = 45 * 60          # 3 个上报周期无快照 -> 杆离线
 ALARM_TRIGGER_CNT = 2          # 连续超限次数才触发（抑制毛刺，与固件一致）
 ALARM_RECOVER_CNT = 2          # 连续正常次数才恢复
-MAX_REQUEST_BODY_BYTES = 1024 * 1024  # LAN API 请求体上限，避免无界内存读取
 
 MIME = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
         ".js": "application/javascript; charset=utf-8", ".png": "image/png",
@@ -114,7 +124,7 @@ DEFAULT_GLOBAL = {
     "fast_interval_sec": "10",   # 风险档采样/上报周期（与采样周期联动）
 }
 CONFIG_KEYS = list(DEFAULT_TH) + list(DEFAULT_GLOBAL)
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 THRESHOLD_KEYS = ("temp_high", "temp_low", "rh_high", "rh_low")
 INTERVAL_KEYS = ("normal_interval_sec", "fast_interval_sec")
 DEVICE_SETTING_KEYS = THRESHOLD_KEYS + INTERVAL_KEYS
@@ -136,6 +146,8 @@ ACTUATOR_CAPABILITIES = (
 # 节点级在线跟踪（内存 + pole_nodes 表持久化，重启不丢记忆）
 _node_last = {}      # (uid, addr) -> 最后上报 ts（记忆：曾见过的节点永久保留）
 _node_seen = {}      # uid -> {addr: True}
+_forecast_training_lock = threading.Lock()
+_forecast_training_warehouses = set()
 
 
 def remember_nodes(conn, uid, nodes, ts):
@@ -153,7 +165,7 @@ def remember_nodes(conn, uid, nodes, ts):
 
 
 def _node_sample_ts(node, received_ts):
-    """Estimate the actual sensor sample time from S3 monotonic age."""
+    """Estimate measurement time from the S3 monotonic age, when available."""
     age_ms = node.get("sample_age_ms") if isinstance(node, dict) else None
     if isinstance(age_ms, bool):
         return int(received_ts)
@@ -167,7 +179,7 @@ def _node_sample_ts(node, received_ts):
 
 
 def _fresh_sample_nodes(conn, uid, nodes, received_ts):
-    """Return only readings newer than the persisted node sample."""
+    """Return only sensor readings newer than the last stored node reading."""
     row = conn.execute(
         "SELECT ts,nodes_json FROM snapshots WHERE uid=? "
         "ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
@@ -253,6 +265,23 @@ def init_db():
         last_ts INT NOT NULL, end_ts INT DEFAULT 0, active INT DEFAULT 1)""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_forecast_alert_active "
                  "ON forecast_alert_log(uid,node_addr,ch,active)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS warehouse_forecast_models(
+        warehouse_id INTEGER PRIMARY KEY,
+        version INTEGER NOT NULL DEFAULT 0,
+        model_json TEXT,
+        status TEXT NOT NULL DEFAULT 'baseline',
+        metrics_json TEXT NOT NULL DEFAULT '{}',
+        validated_mask INTEGER NOT NULL DEFAULT 0,
+        source_snapshot_id INTEGER NOT NULL DEFAULT 0,
+        last_attempt_snapshot_id INTEGER NOT NULL DEFAULT 0,
+        trained_ts INTEGER NOT NULL DEFAULT 0,
+        training_count INTEGER NOT NULL DEFAULT 0,
+        validation_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '')""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS forecast_model_versions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        warehouse_id INTEGER NOT NULL,
+        trained_ts INTEGER NOT NULL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS config(
         key TEXT PRIMARY KEY, value TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS env(
@@ -447,6 +476,186 @@ def db():
     return sqlite3.connect(DB)
 
 
+def _load_unified_forecast_model(conn, warehouse_id):
+    row = conn.execute(
+        "SELECT version,model_json,status,metrics_json,validated_mask,trained_ts,"
+        "training_count,validation_count FROM warehouse_forecast_models "
+        "WHERE warehouse_id=?", (int(warehouse_id),)).fetchone()
+    if not row or not row[0] or not row[1]:
+        return None, {"status": "baseline", "version": 0,
+                      "validated_mask": 0, "training_count": 0,
+                      "validation_count": 0, "trained_ts": None}
+    try:
+        model = json.loads(row[1])
+        if not isinstance(model, dict) or model.get("model_id") != UNIFIED_FORECAST_MODEL_ID:
+            raise ValueError("unsupported unified forecast model")
+        model["version"] = int(row[0])
+        model["metrics"] = json.loads(row[3] or "{}")
+        apply_validation_mask(model, int(row[4] or 0))
+        # Validate the exact bounded vector before it is used or sent to S3.
+        pack_model_parameters(model)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, {"status": "invalid", "version": int(row[0] or 0),
+                      "validated_mask": 0, "training_count": int(row[6] or 0),
+                      "validation_count": int(row[7] or 0),
+                      "trained_ts": int(row[5] or 0) or None}
+    meta = {"status": str(row[2] or "candidate"),
+            "version": int(row[0]), "validated_mask": int(row[4] or 0),
+            "training_count": int(row[6] or 0),
+            "validation_count": int(row[7] or 0),
+            "trained_ts": int(row[5] or 0) or None}
+    return model, meta
+
+
+def _forecast_model_response(conn, warehouse_id, reported_version, now_ts):
+    model, meta = _load_unified_forecast_model(conn, warehouse_id)
+    result = {"forecast_model_status": meta}
+    if model is not None and int(reported_version or 0) != int(meta["version"]):
+        result["forecast_model"] = {
+            "version": meta["version"],
+            "validated_mask": meta["validated_mask"],
+            "parameters": pack_model_parameters(model),
+        }
+    weather = load_current_weather(conn, warehouse_id, now_ts=now_ts)
+    if weather:
+        age = max(0, int(now_ts) - int(weather["ts"]))
+        if age <= 3 * 3600:
+            result["forecast_weather"] = {
+                "ts": int(weather["ts"]),
+                "age_seconds": age,
+                "temperature_c": float(weather["temperature_c"]),
+                "rh_pct": float(weather["rh_pct"]),
+            }
+    return result
+
+
+def _train_unified_forecast_worker(warehouse_id, force=False):
+    warehouse_id = int(warehouse_id)
+    conn = None
+    try:
+        conn = db()
+        latest = conn.execute(
+            "SELECT COALESCE(MAX(id),0) FROM snapshots WHERE warehouse_id=?",
+            (warehouse_id,)).fetchone()[0]
+        latest = int(latest or 0)
+        state = conn.execute(
+            "SELECT version,last_attempt_snapshot_id,validated_mask,model_json "
+            "FROM warehouse_forecast_models WHERE warehouse_id=?",
+            (warehouse_id,)).fetchone()
+        previous_version = int(state[0] or 0) if state else 0
+        last_attempt = int(state[1] or 0) if state else 0
+        if not force and last_attempt and latest - last_attempt < 300:
+            return
+
+        rows = load_training_rows(conn, warehouse_id)
+        if len(rows) < UNIFIED_MIN_TRAINING_ROWS + 24:
+            status = "insufficient_data"
+            conn.execute("""INSERT INTO warehouse_forecast_models
+                (warehouse_id,status,source_snapshot_id,last_attempt_snapshot_id,
+                 last_error) VALUES(?,?,?,?,?) ON CONFLICT(warehouse_id) DO UPDATE SET
+                status=CASE WHEN warehouse_forecast_models.version>0
+                    THEN warehouse_forecast_models.status ELSE excluded.status END,
+                source_snapshot_id=excluded.source_snapshot_id,
+                last_attempt_snapshot_id=excluded.last_attempt_snapshot_id,
+                last_error='有效时间序列不足；等待后续新数据'""",
+                (warehouse_id, status, latest, latest,
+                 "有效时间序列不足；等待后续新数据"))
+            conn.commit()
+            return
+
+        candidate = train_unified_model(rows, version=previous_version + 1)
+        new_mask = unified_validation_mask(candidate)
+        old_mask = int(state[2] or 0) if state else 0
+        if state and state[3] and old_mask & ~new_mask:
+            conn.execute("UPDATE warehouse_forecast_models SET source_snapshot_id=?,"
+                         "last_attempt_snapshot_id=?,last_error=? WHERE warehouse_id=?",
+                         (latest, latest,
+                          "本轮留出验证未保留既有达标输出，继续使用原模型",
+                          warehouse_id))
+            conn.commit()
+            return
+
+        version_row = conn.execute(
+            "INSERT INTO forecast_model_versions(warehouse_id,trained_ts) VALUES(?,?)",
+            (warehouse_id, int(time.time())))
+        version = int(version_row.lastrowid)
+        candidate["version"] = version
+        payload = json.dumps(candidate, ensure_ascii=False, allow_nan=False,
+                             separators=(",", ":"))
+        metrics = json.dumps(candidate.get("metrics", {}), allow_nan=False,
+                             separators=(",", ":"))
+        status = "ready" if new_mask else "candidate"
+        conn.execute("""INSERT INTO warehouse_forecast_models
+            (warehouse_id,version,model_json,status,metrics_json,validated_mask,
+             source_snapshot_id,last_attempt_snapshot_id,trained_ts,training_count,
+             validation_count,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?, '')
+            ON CONFLICT(warehouse_id) DO UPDATE SET version=excluded.version,
+            model_json=excluded.model_json,status=excluded.status,
+            metrics_json=excluded.metrics_json,validated_mask=excluded.validated_mask,
+            source_snapshot_id=excluded.source_snapshot_id,
+            last_attempt_snapshot_id=excluded.last_attempt_snapshot_id,
+            trained_ts=excluded.trained_ts,training_count=excluded.training_count,
+            validation_count=excluded.validation_count,last_error=''""",
+            (warehouse_id, version, payload, status, metrics, new_mask,
+             latest, latest, int(time.time()), candidate["training_count"],
+             candidate["validation_count"]))
+        conn.commit()
+        print(f"[FORECAST] warehouse={warehouse_id} model={version} "
+              f"status={status} mask=0x{new_mask:02X} "
+              f"train={candidate['training_count']} val={candidate['validation_count']}")
+    except Exception as exc:
+        if conn is not None:
+            try:
+                latest = conn.execute(
+                    "SELECT COALESCE(MAX(id),0) FROM snapshots WHERE warehouse_id=?",
+                    (warehouse_id,)).fetchone()[0]
+                conn.execute("""INSERT INTO warehouse_forecast_models
+                    (warehouse_id,status,last_attempt_snapshot_id,last_error)
+                    VALUES(?,'error',?,?) ON CONFLICT(warehouse_id) DO UPDATE SET
+                    last_attempt_snapshot_id=excluded.last_attempt_snapshot_id,
+                    last_error=excluded.last_error""",
+                    (warehouse_id, int(latest or 0), str(exc)[:240]))
+                conn.commit()
+            except sqlite3.Error:
+                pass
+        print(f"[FORECAST] warehouse={warehouse_id} training failed: {exc}")
+    finally:
+        if conn is not None:
+            conn.close()
+        with _forecast_training_lock:
+            _forecast_training_warehouses.discard(warehouse_id)
+
+
+def schedule_unified_forecast_training(warehouse_id, *, force=False):
+    """Run database training away from the snapshot request thread."""
+    try:
+        warehouse_id = int(warehouse_id)
+    except (TypeError, ValueError):
+        return False
+    if warehouse_id <= 0:
+        return False
+    with _forecast_training_lock:
+        if warehouse_id in _forecast_training_warehouses:
+            return False
+        _forecast_training_warehouses.add(warehouse_id)
+    worker = threading.Thread(
+        target=_train_unified_forecast_worker, args=(warehouse_id, bool(force)),
+        name=f"GrainSilo-Forecast-{warehouse_id}", daemon=True)
+    worker.start()
+    return True
+
+
+def schedule_all_unified_forecast_training():
+    conn = db()
+    try:
+        warehouse_ids = [int(row[0]) for row in conn.execute(
+            "SELECT id FROM warehouses WHERE active=1").fetchall()]
+    finally:
+        conn.close()
+    return sum(schedule_unified_forecast_training(value, force=True)
+               for value in warehouse_ids)
+
+
 def _snapshot_time():
     """Return the Station receive time, independent of device clock settings."""
     return int(time.time())
@@ -463,7 +672,8 @@ def _store_minute_snapshot(conn, uid, snap, received_ts):
     battery_mv = float(snap.get("bat_mv") or 0)
     reporting = {key: snap[key] for key in (
         "sample_interval_ms", "report_interval_ms", "adaptive_fast",
-        "measurement_risk", "prediction_risk", "report_queue_replacements")
+        "measurement_risk", "prediction_risk", "report_queue_replacements",
+        "forecast_model_version")
         if key in snap}
     reporting_json = json.dumps(reporting, ensure_ascii=False, sort_keys=True)
     warehouse_id = warehouse_for_uid(conn, uid)
@@ -641,52 +851,37 @@ def _weather_cadence_state(conn, uid, warehouse_id=None):
 
 
 def _weather_cadence_predictions(conn, uid, warehouse_id, now_ts):
-    """Build forecasts from cached weather only; never block S3 ingest on network IO."""
-    location = conn.execute(
-        "SELECT lat,lon FROM warehouse_weather WHERE warehouse_id=?",
-        (int(warehouse_id),)).fetchone()
+    """Use the same validated unified model for S3 cadence and alert decisions."""
     addresses = [int(row[0]) for row in conn.execute(
         "SELECT addr FROM pole_nodes WHERE uid=? ORDER BY addr", (uid,)).fetchall()
         if row[0] is not None]
     if not addresses:
         return [], {"expected_nodes": 0, "ready_nodes": 0,
                     "weather_source": None, "weather_fetched_ts": None}
-    if not location:
-        return [{"status": "not_configured", "forecast": []}
-                for _ in addresses], {"expected_nodes": len(addresses),
-                    "ready_nodes": 0, "weather_source": None,
-                    "weather_fetched_ts": None}
-
-    lat, lon = float(location[0]), float(location[1])
-    cached_weather = _cached_weather_run(
-        conn, lat, lon, now_ts,
-        max_age_sec=WEATHER_CADENCE_CACHE_MAX_AGE,
-        warehouse_id=int(warehouse_id))
-    if not cached_weather or cached_weather.get("status") != "ready":
-        return [{"status": "weather_unavailable", "forecast": []}
-                for _ in addresses], {"expected_nodes": len(addresses),
-                    "ready_nodes": 0, "weather_source": None,
-                    "weather_fetched_ts": None}
-
-    history_rows = conn.execute("""SELECT weather_ts,temperature_c,rh_pct
-        FROM warehouse_weather_observations
-        WHERE warehouse_id=? AND lat_key=? AND lon_key=? AND weather_ts>=?
-        ORDER BY weather_ts DESC LIMIT 1080""",
-        (int(warehouse_id), f"{lat:.6f}", f"{lon:.6f}",
-         int(now_ts) - 45 * 86400)).fetchall()
-    weather_history = [{"ts": row[0], "temperature_c": row[1], "rh_pct": row[2]}
-                       for row in reversed(history_rows)]
-    weather_forecast = cached_weather.get("series") or []
+    model, model_meta = _load_unified_forecast_model(conn, warehouse_id)
+    weather = load_current_weather(conn, warehouse_id, now_ts=now_ts)
+    histories = load_probe_histories(
+        conn, uid, now_ts=now_ts, warehouse_id=warehouse_id)
+    weather_source = None
+    weather_fetched_ts = None
+    if weather:
+        row = conn.execute(
+            "SELECT source,fetched_ts FROM warehouse_weather_runs "
+            "WHERE warehouse_id=? ORDER BY fetched_ts DESC,id DESC LIMIT 1",
+            (int(warehouse_id),)).fetchone()
+        if row:
+            weather_source, weather_fetched_ts = row[0], int(row[1])
     predictions = []
     for addr in addresses:
-        samples = _probe_hourly_samples(conn, uid, addr, int(warehouse_id))
-        predictions.append(predict_weather_assisted_air_state(
-            samples, weather_history, weather_forecast, int(now_ts)))
+        predictions.append(predict_unified_forecast(
+            model, histories, addr, weather=weather, now_ts=int(now_ts)))
     return predictions, {"expected_nodes": len(addresses),
                          "ready_nodes": sum(item.get("status") == "ready"
                                              for item in predictions),
-                         "weather_source": cached_weather.get("source"),
-                         "weather_fetched_ts": cached_weather.get("fetched_ts")}
+                         "model_version": model_meta["version"],
+                         "validated_mask": model_meta["validated_mask"],
+                         "weather_source": weather_source,
+                         "weather_fetched_ts": weather_fetched_ts}
 
 
 def _evaluate_weather_cadence(conn, uid, warehouse_id, now_ts):
@@ -707,12 +902,10 @@ def _evaluate_weather_cadence(conn, uid, warehouse_id, now_ts):
         previous, predictions, thresholds, now_ts=int(now_ts))
     updated.update(metadata)
     updated["evaluated_ts"] = int(now_ts)
-    updated["policy"] = "validated_weather_forecast_v1"
+    updated["policy"] = "unified_forecast_v1"
     addresses = [int(row[0]) for row in conn.execute(
         "SELECT addr FROM pole_nodes WHERE uid=? ORDER BY addr", (uid,)).fetchall()
         if row[0] is not None]
-    _sync_weather_forecast_alerts(
-        conn, uid, warehouse_id, addresses, predictions, thresholds, int(now_ts))
     write_audit(conn, "weather_cadence.evaluate", "probe", uid, updated,
                 actor="weather-policy", warehouse_id=warehouse_id)
     return updated
@@ -729,7 +922,7 @@ def _device_setting_targets(conn, uid, resolved=None):
         policy.get("mode"), base_normal, values["fast_interval_sec"])
     values["normal_interval_sec"] = effective_normal
     if effective_normal != base_normal:
-        sources["normal_interval_sec"] = "weather_forecast"
+        sources["normal_interval_sec"] = "unified_forecast"
     policy = dict(policy)
     policy["base_normal_interval_sec"] = base_normal
     policy["effective_normal_interval_sec"] = effective_normal
@@ -1088,6 +1281,10 @@ def _forecast_crossing(prediction, channel, cfg):
     if prediction.get("status") != "ready":
         return None
     for point in prediction.get("forecast", []):
+        if channel == "temp" and point.get("temperature_validated") is False:
+            continue
+        if channel == "rh" and point.get("rh_validated") is False:
+            continue
         value = point.get("temperature_c") if channel == "temp" else point.get("rh_pct")
         if value is None:
             continue
@@ -1106,15 +1303,19 @@ def _forecast_crossing(prediction, channel, cfg):
 
 
 def _update_forecast_alerts(conn, uid, nodes, cfg, now_ts):
-    """Persist forecast-only alerts; unavailable history never implies recovery."""
+    """Persist alerts only from the warehouse's validated unified model."""
     warehouse_id = warehouse_for_uid(conn, uid)
+    model, _meta = _load_unified_forecast_model(conn, warehouse_id)
+    weather = load_current_weather(conn, warehouse_id, now_ts=now_ts)
+    histories = load_probe_histories(
+        conn, uid, now_ts=now_ts, warehouse_id=warehouse_id)
     for node in nodes:
         try:
             addr = int(node.get("addr"))
         except (TypeError, ValueError):
             continue
-        prediction = predict_air_state(
-            _probe_samples(conn, uid, addr), now_ts=now_ts)
+        prediction = predict_unified_forecast(
+            model, histories, addr, weather=weather, now_ts=now_ts)
         if prediction["status"] != "ready":
             continue
         for channel in ("temp", "rh"):
@@ -1570,6 +1771,28 @@ def fetch_historical_weather(lat, lon, start_date, end_date):
     return records
 
 
+def _ip_location_candidates():
+    """Use IP lookup only for a transient place-name hint, then geocode it.
+
+    Provider IP and coordinates are intentionally discarded; only geocoded
+    candidates are returned and the caller must explicitly save one.
+    """
+    request = urllib.request.Request(
+        "https://ipapi.co/json/",
+        headers={"User-Agent": "GrainSilo-Station/1.0", "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=4) as response:
+        raw = response.read(8193)
+    if len(raw) > 8192:
+        raise ValueError("IP 定位响应超过大小限制")
+    data = json.loads(raw.decode("utf-8"))
+    hint = " ".join(str(data.get(key) or "").strip()
+                     for key in ("city", "region", "country_name"))
+    hint = " ".join(hint.split())[:120]
+    if len(hint) < 2:
+        raise ValueError("IP 定位服务未返回可用城市信息")
+    return _geocode_locations(hint), hint
+
+
 def _weather_current_bundle(raw):
     """Decode current and daily fields, accepting pre-upgrade flat JSON rows."""
     value = json.loads(raw or "{}")
@@ -1726,29 +1949,6 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- POST ----------
     def do_POST(self):
-        raw_length = self.headers.get("Content-Length", "0")
-        if not raw_length.isascii() or not raw_length.isdecimal():
-            self.close_connection = True
-            self._json(400, {"ok": False, "err": "invalid content length"})
-            return
-        try:
-            content_length = int(raw_length)
-        except ValueError:
-            self.close_connection = True
-            self._json(400, {"ok": False, "err": "invalid content length"})
-            return
-        if content_length > MAX_REQUEST_BODY_BYTES:
-            # Do not leave an unread request body on a reusable connection.
-            self.close_connection = True
-            self.send_response(413)
-            self.send_header("Connection", "close")
-            body = json.dumps({"ok": False, "err": "request body too large"},
-                              ensure_ascii=False).encode("utf-8")
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if not self._select_warehouse_context():
             return
         p = urlparse(self.path).path
@@ -2251,12 +2451,18 @@ class Handler(BaseHTTPRequestHandler):
                              "WHERE uid=?", (reported_revision, now, uid))
         settings_state = _device_settings_state(conn, uid)
         settings_payload = _remote_settings_payload(settings_state)
+        model_payload = _forecast_model_response(
+            conn, policy_warehouse_id,
+            snap.get("forecast_model_version", 0), now)
         conn.commit()
         conn.close()
+        schedule_unified_forecast_training(policy_warehouse_id)
         mode = "DEBUG" if snap.get("mode") == 1 else "LOWPOWER"
         print(f"[SNAP] uid={uid} mode={mode} alarm={snap.get('alarm')} "
               f"nodes={len(snap.get('nodes', []))} bat={bat} cmd={cmd}")
-        self._json(200, {"ok": True, "cmd": cmd, "settings": settings_payload})
+        response = {"ok": True, "cmd": cmd, "settings": settings_payload}
+        response.update(model_payload)
+        self._json(200, response)
 
     def _env_post(self):
         """环境监测预留口：任意 JSON 对象直接存库，前端原样显示"""
@@ -2448,6 +2654,8 @@ class Handler(BaseHTTPRequestHandler):
             self._weather_location_get()
         elif p == "/api/v1/weather/geocode":
             self._weather_geocode(q)
+        elif p == "/api/v1/weather/ip-location":
+            self._weather_ip_location()
         elif p == "/api/v1/weather/history":
             self._weather_history(q)
         elif p == "/api/v1/env":
@@ -3528,6 +3736,17 @@ class Handler(BaseHTTPRequestHandler):
                          "source": "Open-Meteo Geocoding / GeoNames",
                          "saved": False})
 
+    def _weather_ip_location(self):
+        try:
+            results, place_hint = _ip_location_candidates()
+        except Exception as exc:
+            self._json(502, {"ok": False, "err": "IP 定位候选暂不可用：%s" % exc})
+            return
+        self._json(200, {"ok": True, "results": results, "saved": False,
+                         "place_hint": place_hint,
+                         "source": "ipapi.co approximate city + Open-Meteo Geocoding",
+                         "privacy_note": "仅本次点击查询；不保存原始公网 IP 或 IP 服务坐标，候选位置需人工确认后保存。"})
+
     def _weather_backfill_post(self):
         try:
             body = self._read_bounded_json(2048)
@@ -3732,6 +3951,98 @@ class Handler(BaseHTTPRequestHandler):
                          "field": field_meta})
 
     def _probe_forecast(self, q):
+        """Return the one shared Station/S3 forecast and its validation state."""
+        args = urllib.parse.parse_qs(q, keep_blank_values=True)
+        uid = (args.get("uid") or [""])[0].strip()
+        try:
+            addr = int((args.get("addr") or [""])[0])
+        except (TypeError, ValueError):
+            addr = 0
+        if not uid or len(uid) > 32 or addr < 1 or addr > 247:
+            self._json(400, {"ok": False, "err": "uid and addr=1..247 required"})
+            return
+        conn = db()
+        pole = conn.execute(
+            "SELECT uid FROM poles WHERE uid=? AND warehouse_id=?",
+            (uid, self.warehouse_id)).fetchone()
+        if not pole:
+            conn.close()
+            self._json(404, {"ok": False, "err": "unknown probe"})
+            return
+        now = int(time.time())
+        model, model_meta = _load_unified_forecast_model(conn, self.warehouse_id)
+        histories = load_probe_histories(
+            conn, uid, now_ts=now, warehouse_id=self.warehouse_id)
+        weather = load_current_weather(conn, self.warehouse_id, now_ts=now)
+        prediction = predict_unified_forecast(
+            model, histories, addr, weather=weather, now_ts=now)
+        cfg = effective_thresholds(
+            conn, uid=uid, warehouse_id=self.warehouse_id)["values"]
+        latest = conn.execute(
+            "SELECT reporting_json FROM snapshots WHERE uid=? AND warehouse_id=? "
+            "ORDER BY ts DESC,id DESC LIMIT 1", (uid, self.warehouse_id)).fetchone()
+        conn.close()
+
+        own = histories.get(addr) or []
+        current_sample = own[-1] if own else None
+        current = ({"temperature_c": current_sample["temp"],
+                    "rh_pct": current_sample["rh"], "ts": current_sample["ts"]}
+                   if current_sample else None)
+        measured = []
+        if current_sample:
+            for channel in ("temp", "rh"):
+                value = current_sample[channel]
+                crossing = _forecast_crossing(
+                    {"status": "ready", "forecast": [{
+                        "hour": 0,
+                        "temperature_c": value if channel == "temp" else None,
+                        "rh_pct": value if channel == "rh" else None,
+                    }]}, channel, cfg)
+                if crossing:
+                    crossing.update({"channel": channel, "source": "measured"})
+                    measured.append(crossing)
+        forecast_crossings = []
+        for channel in ("temp", "rh"):
+            crossing = _forecast_crossing(prediction, channel, cfg)
+            if crossing:
+                crossing.update({"channel": channel, "source": "unified_forecast"})
+                forecast_crossings.append(crossing)
+        try:
+            latest_reporting = json.loads(latest[0] or "{}") if latest else {}
+        except (TypeError, ValueError):
+            latest_reporting = {}
+        try:
+            device_version = int(latest_reporting.get("forecast_model_version", 0))
+        except (TypeError, ValueError):
+            device_version = 0
+        self._json(200, {
+            "ok": True, "uid": uid, "addr": addr,
+            "current": current,
+            "unified_prediction": prediction,
+            "model": {"id": UNIFIED_FORECAST_MODEL_ID,
+                      "version": model_meta["version"],
+                      "status": model_meta["status"],
+                      "validated_mask": model_meta["validated_mask"],
+                      "training_count": model_meta["training_count"],
+                      "validation_count": model_meta["validation_count"],
+                      "trained_ts": model_meta["trained_ts"],
+                      "device_version": device_version,
+                      "device_synced": device_version == model_meta["version"]},
+            "thresholds": {"temperature_low_c": float(cfg["temp_low"]),
+                           "temperature_high_c": float(cfg["temp_high"]),
+                           "rh_low_pct": float(cfg["rh_low"]),
+                           "rh_high_pct": float(cfg["rh_high"])},
+            "risk": {"measured": measured,
+                     "unified_forecast": forecast_crossings,
+                     "active": bool(measured or forecast_crossings)},
+            "weather": {"status": "included" if prediction.get("weather_input") ==
+                        "gridded_weather" else "unavailable",
+                        "measurement_type": "gridded_model_context",
+                        "ts": weather.get("ts") if weather else None},
+            "note": "Station 与 S3 使用同一版本、同一参数和同一推理公式。未通过时间留出基线验证的温度/湿度时域显示持续性基线，不参与预测告警或采样控制。目标为探杆周围空气温湿度，不是粮食含水率或整仓实测温度场。",
+        })
+
+    def _probe_forecast_legacy(self, q):
         """Return separate S3, trend-only, and weather-assisted air forecasts."""
         args = urllib.parse.parse_qs(q, keep_blank_values=True)
         uid = (args.get("uid") or [""])[0].strip()
@@ -3918,6 +4229,141 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _forecast(self, q):
+        """Aggregate the same per-node model outputs shown by probe detail."""
+        args = urllib.parse.parse_qs(q, keep_blank_values=True)
+        try:
+            pile_id = int((args.get("pile") or [""])[0])
+            if pile_id <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            pile_id = None
+        try:
+            hours = max(1, min(int((args.get("hours") or ["6"])[0]), 24))
+        except (TypeError, ValueError):
+            hours = 6
+
+        def coordinate(name, lower, upper):
+            try:
+                value = float((args.get(name) or [""])[0])
+                return value if lower <= value <= upper else None
+            except (TypeError, ValueError):
+                return None
+
+        lat = coordinate("lat", -90.0, 90.0)
+        lon = coordinate("lon", -180.0, 180.0)
+        conn = db()
+        if lat is None or lon is None:
+            saved = conn.execute(
+                "SELECT lat,lon FROM warehouse_weather WHERE warehouse_id=?",
+                (self.warehouse_id,)).fetchone()
+            if saved:
+                lat, lon = float(saved[0]), float(saved[1])
+        cfg = get_cfg(conn, self.warehouse_id)
+        _heap, _grid, samples = _idw_grid(cfg, pile_id, self.warehouse_id)
+        now = int(time.time())
+        current_temp = [float(s["t"]) for s in samples
+                        if s.get("t") is not None and s.get("online")]
+        current_rh = [float(s["h"]) for s in samples
+                      if s.get("h") is not None and s.get("online")]
+        current = {
+            "sample_count": len(current_temp),
+            "mean_c": round(sum(current_temp) / len(current_temp), 2)
+                      if current_temp else None,
+            "min_c": round(min(current_temp), 2) if current_temp else None,
+            "max_c": round(max(current_temp), 2) if current_temp else None,
+            "rh_mean_pct": round(sum(current_rh) / len(current_rh), 2)
+                           if current_rh else None,
+            "rh_min_pct": round(min(current_rh), 2) if current_rh else None,
+            "rh_max_pct": round(max(current_rh), 2) if current_rh else None,
+            "ts": max((s.get("ts", 0) for s in samples), default=0),
+        }
+        weather = _cached_weather_run(
+            conn, lat, lon, now, warehouse_id=self.warehouse_id)
+        if weather is None and lat is not None and lon is not None:
+            weather = _open_meteo(lat, lon, 48)
+            _store_weather_run(conn, lat, lon, weather, now, self.warehouse_id)
+            conn.commit()
+        elif weather is None:
+            weather = {"status": "not_configured",
+                       "note": "请配置当前仓库天气坐标。"}
+        if weather.get("status") == "ready":
+            weather = dict(weather)
+            weather["series"] = (weather.get("series") or [])[:hours]
+        model, model_meta = _load_unified_forecast_model(conn, self.warehouse_id)
+        if pile_id is None:
+            poles = conn.execute(
+                "SELECT uid FROM poles WHERE warehouse_id=? AND "
+                "(deleted=0 OR deleted IS NULL) ORDER BY uid",
+                (self.warehouse_id,)).fetchall()
+        else:
+            poles = conn.execute(
+                "SELECT uid FROM poles WHERE warehouse_id=? AND pile_id=? AND "
+                "(deleted=0 OR deleted IS NULL) ORDER BY uid",
+                (self.warehouse_id, pile_id)).fetchall()
+        by_horizon = {hour: [] for hour in (1, 3, 6) if hour <= hours}
+        weather_context = load_current_weather(conn, self.warehouse_id, now_ts=now)
+        for (uid,) in poles:
+            histories = load_probe_histories(
+                conn, uid, now_ts=now, warehouse_id=self.warehouse_id)
+            for addr in histories:
+                result = predict_unified_forecast(
+                    model, histories, addr, weather=weather_context, now_ts=now)
+                if result.get("status") == "stale":
+                    continue
+                for point in result.get("forecast", []):
+                    hour = int(point.get("hour", 0))
+                    if hour not in by_horizon:
+                        continue
+                    by_horizon[hour].append({
+                        "uid": uid, "addr": addr,
+                        "temperature_c": point["temperature_c"],
+                        "rh_pct": point["rh_pct"],
+                        "temperature_validated": point["temperature_validated"],
+                        "rh_validated": point["rh_validated"],
+                        "model_version": result["model_version"],
+                    })
+        conn.close()
+
+        forecast = []
+        for hour, nodes in by_horizon.items():
+            if not nodes:
+                continue
+            temperatures = [node["temperature_c"] for node in nodes]
+            humidities = [node["rh_pct"] for node in nodes]
+            forecast.append({
+                "hour": hour, "ts": now + hour * 3600,
+                "temperature_c": round(sum(temperatures) / len(temperatures), 2),
+                "temperature_min_c": round(min(temperatures), 2),
+                "temperature_max_c": round(max(temperatures), 2),
+                "rh_pct": round(sum(humidities) / len(humidities), 2),
+                "rh_min_pct": round(min(humidities), 2),
+                "rh_max_pct": round(max(humidities), 2),
+                "sample_count": len(nodes), "nodes": nodes,
+                "temperature_validated_count": sum(
+                    bool(node["temperature_validated"]) for node in nodes),
+                "rh_validated_count": sum(bool(node["rh_validated"]) for node in nodes),
+            })
+        note = ("电脑端与 S3 共用同一统一模型版本；未通过按时间留出的持续性基线验证时，显示当前值保持的基线，不据此触发预测告警或采样控制。天气输入是网格天气模型，不是仓内实测。预测目标为探杆周围空气温湿度，不代表整仓粮温或粮食含水率。"
+                if forecast else
+                "当前没有新鲜有效的探杆读数；离线或过期读数不会外推。")
+        self._json(200, {
+            "ok": True, "pile_id": pile_id,
+            "method": "unified_mlp" if model_meta["validated_mask"] else "persistence_baseline",
+            "model": {"id": UNIFIED_FORECAST_MODEL_ID,
+                      "version": model_meta["version"],
+                      "status": model_meta["status"],
+                      "validated_mask": model_meta["validated_mask"],
+                      "training_count": model_meta["training_count"],
+                      "validation_count": model_meta["validation_count"],
+                      "trained_ts": model_meta["trained_ts"]},
+            "current": current, "forecast": forecast, "weather": weather,
+            "coverage": {"current_probe_count": current["sample_count"],
+                         "forecast_probe_count": max((len(v) for v in by_horizon.values()),
+                                                     default=0)},
+            "note": note,
+        })
+
+    def _forecast_legacy(self, q):
         """Aggregate only qualified per-probe air trends; weather is context only."""
         args = urllib.parse.parse_qs(q, keep_blank_values=True)
         try:
@@ -4026,15 +4472,8 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, p):
         if p == "/":
             p = "/index.html"
-        web_root = os.path.realpath(os.path.abspath(WEB))
-        relative_path = urllib.parse.unquote(p).lstrip("/\\")
-        path = os.path.realpath(os.path.abspath(os.path.join(web_root, relative_path)))
-        try:
-            common_path = os.path.commonpath((web_root, path))
-        except ValueError:
-            common_path = ""
-        if (os.path.normcase(common_path) != os.path.normcase(web_root) or
-                not os.path.isfile(path)):
+        path = os.path.normpath(os.path.join(WEB, p.lstrip("/")))
+        if not path.startswith(WEB) or not os.path.isfile(path):
             self._json(404, {"ok": False, "err": "not found"})
             return
         ext = os.path.splitext(path)[1].lower()
@@ -4194,6 +4633,7 @@ if __name__ == "__main__":
     if not os.path.isdir(WEB):
         raise RuntimeError(f"找不到随程序发布的网页资源目录：{WEB}")
     init_db()
+    schedule_all_unified_forecast_training()
     threading.Thread(target=_weather_archive_worker,
                      name="weather-archive", daemon=True).start()
     args = [arg for arg in sys.argv[1:] if arg != "--no-browser"]

@@ -49,16 +49,17 @@
     <aside class="station-stack">
       <section class="station-card">
         <div class="station-card-head"><div><span class="station-eyebrow">LOCAL WEATHER MODEL</span><h2>所在地天气旁证</h2></div><span class="station-badge" id="weatherStatus">未配置位置</span></div>
-        <p>当地逐小时天气会作为外界边界条件，进入独立的探杆周围空气温湿度预测；天气模型、探杆实测与粮仓内部环境仍分开展示。</p>
+        <p>当地逐小时天气只作为室外上下文并入统一的探杆周围空气温湿度模型；天气数据、探杆实测和独立仓内环境仍分别标注，不会互相冒充。</p>
         <form id="weatherLocationForm" class="station-form station-weather-form">
           <div class="station-weather-tools">
+            <button id="weatherIpButton" class="station-button" type="button">按网络位置推荐</button>
             <button id="weatherLocateButton" class="station-button" type="button">使用浏览器当前位置</button>
             <div class="station-weather-search">
               <label>城市 / 地区<input id="weatherSearchName" maxlength="120" placeholder="例如：宁波市 鄞州区"></label>
               <button id="weatherSearchButton" class="station-button" type="button">搜索地点</button>
             </div>
           </div>
-          <p class="station-footer-note">地点数据：<a href="https://www.geonames.org/" target="_blank" rel="noopener noreferrer">GeoNames</a></p>
+          <p class="station-privacy-note">按网络位置仅在点击时请求一次中心站的公网 IP 定位服务，精度约为城市级；原始 IP 和定位服务坐标不会保存。请核对候选后手动保存。</p>
           <div id="weatherSearchResults" class="station-weather-candidates" aria-live="polite"></div>
           <div class="station-form-grid">
             <label>纬度<input id="weatherLat" type="number" min="-90" max="90" step="any" placeholder="例如 39.90"></label>
@@ -68,7 +69,7 @@
         </form>
         <p class="station-footer-note">定位仅在点击时请求授权；地点搜索只填入候选坐标，不会自动保存。保存后，所选仓库的坐标会发给 Open-Meteo 获取天气模型数据。</p>
         <div class="station-weather-backfill">
-          <div><b>补全历史天气</b><small>按当前仓库坐标获取逐小时网格天气模型历史，用于天气辅助预测校准；不是现场气象站实测。</small></div>
+          <div><b>补全历史天气</b><small>按当前仓库坐标获取逐小时网格天气模型历史，用于统一模型训练与留出回测；不是现场气象站实测。</small></div>
           <label>开始日期<input id="weatherBackfillStart" type="date"></label>
           <label>结束日期<input id="weatherBackfillEnd" type="date"></label>
           <button id="weatherBackfillButton" class="station-button" type="button">回填所选日期</button>

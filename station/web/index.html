@@ -145,7 +145,7 @@
     </div>
     <div class="probe-detail-head"><b>探杆测点</b><span id="detailProbeCount">（0 个测点）</span></div>
     <div class="probe-table-wrap"><table class="probe-table"><thead><tr><th>测点位置</th><th>深度</th><th>温度</th><th>状态</th></tr></thead><tbody id="detailProbeTable"><tr><td colspan="4">等待探杆上报</td></tr></tbody></table></div>
-    <div class="detail-trend-summary"><div><span>当前核心温度</span><b id="detailCoreTemp">-</b></div><div><span>7天后预计</span><b id="detailTrendDelta">-</b></div><div><span>风险提示</span><b id="detailRisk">等待数据</b></div></div>
+    <div class="detail-trend-summary"><div><span>当前测点均值</span><b id="detailCoreTemp">-</b></div><div><span>统一模型</span><b id="detailTrendDelta">等待节点</b></div><div><span>预测状态</span><b id="detailRisk">暂不判断</b></div></div>
     <div class="forecast-kicker">MEASURED → INTERPOLATED → FORECAST</div>
     <div class="forecast-title-row">
       <h2>温度场与预测</h2>
@@ -160,23 +160,13 @@
       <div><span>插值网格</span><b id="fcField">-</b></div>
     </div>
 
-    <div class="forecast-section-head">
-      <span>在线测点未来温湿度趋势均值</span>
-      <span class="forecast-unit">探杆周围空气 · 非整堆实测</span>
-    </div>
-    <div class="forecast-list" id="forecastList">
-      <div class="forecast-empty">选择一个粮堆后显示</div>
-    </div>
-
     <section class="probe-air-forecast" aria-labelledby="probeAirTitle">
       <div class="forecast-section-head"><span id="probeAirTitle">单节点周围空气温湿度预测</span>
         <select id="probeForecastSelect" aria-label="选择探杆节点"><option value="">暂无测点</option></select>
       </div>
-      <p class="probe-air-note" id="probeForecastMeta">分开显示探杆历史趋势、天气辅助预测和 S3 设备预测。天气模型使用本仓逐小时天气与探杆实测配对拟合，仅在数据和留出验证达标后给出数值。</p>
-      <div class="probe-air-sources">
-        <div><b>电脑端历史趋势</b><span id="stationProbeForecast"><span class="forecast-empty">等待选择测点</span></span></div>
-        <div><b>S3 探杆端预测</b><span id="s3ProbeForecast"><span class="forecast-empty">等待选择测点</span></span></div>
-        <div class="probe-weather-model"><b>电脑端天气辅助预测</b><span id="weatherProbeForecast"><span class="forecast-empty">等待逐小时配对数据</span></span></div>
+      <p class="probe-air-note" id="probeForecastMeta">电脑端与 S3 共用同一模型版本、参数和推理公式。天气是辅助输入，未通过时间留出基线验证的输出不会触发预测告警或采样控制。</p>
+      <div class="probe-air-sources unified">
+        <div><b>同一模型 · +1 / +3 / +6 小时</b><span id="stationProbeForecast"><span class="forecast-empty">等待选择测点</span></span></div>
       </div>
       <div class="probe-air-risk" id="probeForecastRisk" role="status">预测风险与实测超限分开显示；数据不足或过期不会判为安全。</div>
     </section>
@@ -188,7 +178,7 @@
         <label>经度 <input id="weatherLon" inputmode="decimal" placeholder="如 116.40"></label>
       </div>
       <button class="ghost weather-btn" id="weatherLoad">保存位置并更新天气预测</button>
-      <div class="weather-source" id="weatherSource">天气模型是网格天气，不是仓内实测；配对探杆历史并通过留出验证后，才用于天气辅助预测。</div>
+      <div class="weather-source" id="weatherSource">天气是外部网格数据，不是仓内实测；仅作为统一模型的辅助输入，未验证输出不用于告警或采样控制。</div>
     </div>
     <div class="forecast-note" id="forecastNote">预测需要有效探杆温度；IDW 与预测均不等同于 CFD 求解。</div>
   </aside>
@@ -699,59 +689,59 @@ function renderPileDetail() {
 
 function renderProbeForecastUnavailable(message) {
   document.getElementById("stationProbeForecast").innerHTML = '<span class="forecast-empty">' + esc(message) + '</span>';
-  document.getElementById("s3ProbeForecast").innerHTML = '<span class="forecast-empty">' + esc(message) + '</span>';
-  document.getElementById("weatherProbeForecast").innerHTML = '<span class="forecast-empty">' + esc(message) + '</span>';
+  document.getElementById("detailTrendDelta").textContent = "等待节点";
+  document.getElementById("detailRisk").textContent = "暂不判断";
   document.getElementById("probeForecastRisk").textContent = "数据不足或过期时不作安全判断。";
   document.getElementById("probeForecastRisk").classList.remove("risk");
 }
 
-function renderProbeForecastSource(hostId, prediction, sourceName) {
-  var host = document.getElementById(hostId);
-  if (!prediction || prediction.status !== "ready") {
-    var status = prediction && prediction.status === "stale" ? "最新样本已过期" : "模型预热中";
-    var count = prediction ? Number(prediction.sample_count || 0) : 0;
-    var span = prediction ? Number(prediction.span_seconds || 0) : 0;
-    host.innerHTML = '<span class="forecast-empty">' + sourceName + " · " + status +
-      "（" + count + " 个样本 / " + span + " 秒）；需至少 6 个样本覆盖 5 分钟</span>";
-    return;
-  }
-  var rows = prediction.forecast || [];
-  host.innerHTML = rows.map(function (point) {
-    return '<span class="probe-air-point"><small>+' + Number(point.hour) + ' 小时</small><b>' +
-      Number(point.temperature_c).toFixed(1) + ' °C</b><em>' +
-      Number(point.rh_pct).toFixed(1) + ' %RH</em></span>';
-  }).join("") || '<span class="forecast-empty">预测点不可用</span>';
-}
-
-function renderWeatherProbeForecast(prediction) {
-  var host = document.getElementById("weatherProbeForecast");
-  if (!prediction || prediction.status !== "ready") {
-    var temp = prediction && prediction.temperature_calibration || {};
-    var vapor = prediction && prediction.vapor_pressure_calibration || {};
-    var count = Math.min(Number(temp.sample_count || 0), Number(vapor.sample_count || 0));
-    var status = prediction && prediction.status === "not_validated" ? "留出验证未通过" :
-      prediction && prediction.status === "stale" ? "最新探杆读数已过期" :
-      prediction && prediction.status === "not_configured" ? "尚未配置本仓天气位置" :
-      prediction && prediction.status === "unavailable" ? "天气服务暂不可用" : "模型预热中";
-    host.innerHTML = '<span class="forecast-empty">天气辅助预测 · ' + status +
-      '（温度 ' + Number(temp.sample_count || 0) + '/72，水汽 ' +
-      Number(vapor.sample_count || 0) + '/72 个有效逐小时转移）</span>';
-    return;
-  }
-  var points = (prediction.forecast || []).filter(function (point) {
-    return Number.isFinite(Number(point.hour)) &&
-      Number.isFinite(Number(point.temperature_c)) &&
-      Number.isFinite(Number(point.rh_pct));
-  });
+function renderUnifiedProbeForecast(data) {
+  var host = document.getElementById("stationProbeForecast");
+  var prediction = data && data.unified_prediction || {};
+  var model = data && data.model || {};
+  var points = prediction.forecast || [];
   if (!points.length) {
-    host.innerHTML = '<span class="forecast-empty">模型已验证，但未来天气小时数据不完整，暂不外推。</span>';
-    return;
+    host.innerHTML = '<span class="forecast-empty">' + esc(
+      prediction.status === "stale" ? "节点读数过期，不使用陈旧值外推。" :
+      prediction.reason || "等待新鲜有效的节点读数。") + '</span>';
+  } else {
+    host.innerHTML = points.map(function (point) {
+      var temp = point.temperature_validated ? "已验证模型" : "持续性基线回退";
+      var rh = point.rh_validated ? "已验证模型" : "持续性基线回退";
+      var preview = point.candidate_available ?
+        '<small class="probe-air-preview">统一模型候选观察值：' +
+        Number(point.candidate_temperature_c).toFixed(1) + ' °C / ' +
+        Number(point.candidate_rh_pct).toFixed(1) +
+        ' %RH · 未验证，不参与告警或采样控制</small>' :
+        '<small class="probe-air-preview">统一模型尚未就绪；当前仅显示持续性基线。</small>';
+      return '<span class="probe-air-point"><small>+' + Number(point.hour) +
+        ' 小时</small><b>采用 ' + Number(point.temperature_c).toFixed(1) +
+        ' °C</b><em>' + Number(point.rh_pct).toFixed(1) +
+        ' %RH</em><small>采用来源：温度 ' + temp + ' · 湿度 ' + rh +
+        '</small>' + preview + '</span>';
+    }).join("");
   }
-  host.innerHTML = points.map(function (point) {
-    return '<span class="probe-air-point"><small>+' + Number(point.hour) + ' 小时</small><b>' +
-      Number(point.temperature_c).toFixed(1) + ' °C</b><em>' +
-      Number(point.rh_pct).toFixed(1) + ' %RH</em></span>';
-  }).join("") + '<small class="probe-weather-meta">探杆周围空气估算 · 天气网格输入 · 非整堆实测</small>';
+  var status = prediction.status === "ready" ? "存在通过留出验证的模型输出" :
+    prediction.status === "candidate" ? "统一模型已训练；候选值仅供观察，暂未优于基线" :
+    prediction.status === "stale" ? "最新节点数据过期" :
+    prediction.status === "warming_up" ? "等待新鲜测量" : "当前使用持续性基线（无需预热）";
+  var sync = model.device_synced ? "S3 已同步" : "S3 等待同步";
+  document.getElementById("probeForecastMeta").textContent =
+    "统一模型 v" + Number(model.version || 0) + " · " + status + " · " + sync +
+    "。天气输入为外部网格模型，不是仓内实测；结果代表探杆周围空气，不是整仓粮温或粮食含水率。";
+  var risk = data && data.risk || {};
+  var labels = [];
+  if ((risk.measured || []).length) labels.push("实测超限");
+  if ((risk.unified_forecast || []).length) labels.push("已验证的统一模型预测越限");
+  document.getElementById("detailTrendDelta").textContent = status;
+  document.getElementById("detailRisk").textContent = labels.length ? labels.join("、") :
+    prediction.status === "ready" ? "已验证输出·未越限" :
+    prediction.status === "candidate" ? "候选观察·不作告警" : "暂无已验证风险结论";
+  var riskEl = document.getElementById("probeForecastRisk");
+  riskEl.textContent = labels.length ? "需要关注：" + labels.join("；") + "。请同时核对原始实测值。" :
+    prediction.status === "ready" ? "已验证输出暂未越限；未验证通道不作为风险结论。" :
+    "暂无可用于预测风险判断的已验证输出；这不代表安全。";
+  riskEl.classList.toggle("risk", labels.length > 0);
 }
 
 function loadProbeForecast() {
@@ -764,44 +754,10 @@ function loadProbeForecast() {
   var parts = value.split(":");
   apiGet("/api/v1/probe-forecast?uid=" + encodeURIComponent(parts[0]) +
     "&addr=" + encodeURIComponent(parts.slice(1).join(":"))).then(function (data) {
-      renderProbeForecastSource("stationProbeForecast", data.station_prediction, "电脑端");
-      renderProbeForecastSource("s3ProbeForecast", data.s3_prediction ? {
-        status: data.s3_prediction.status,
-        sample_count: data.s3_prediction.sample_count,
-        span_seconds: data.s3_prediction.span_s,
-        forecast: (data.s3_prediction.points || []).map(function (point) {
-          return {hour: point.hour, temperature_c: point.temp, rh_pct: point.rh};
-        })
-      } : null, "S3");
-      renderWeatherProbeForecast(data.weather_prediction);
-      var risk = data.risk || {}, labels = [];
-      if ((risk.measured || []).length) labels.push("实测超限");
-      if ((risk.station_forecast || []).length) labels.push("电脑端预测越限");
-      if ((risk.s3_forecast || []).length) labels.push("S3 预测越限");
-      if ((risk.weather_forecast || []).length) labels.push("天气辅助预测越限");
-      var riskEl = document.getElementById("probeForecastRisk");
-      riskEl.textContent = labels.length ? "需要关注：" + labels.join("；") + "。请同时查看原始实测值。" :
-        (data.station_prediction && data.station_prediction.status === "ready" ?
-          "当前所选节点的实测值及可用预测未触及配置阈值。" : "尚无足够新鲜历史样本，暂不作风险结论。");
-      riskEl.classList.toggle("risk", labels.length > 0);
+      renderUnifiedProbeForecast(data);
     }).catch(function () {
       renderProbeForecastUnavailable("预测接口暂时不可用；现有测量、热场和历史页面不受影响。");
     });
-}
-
-function renderForecastSummary(data) {
-  var current = data && data.current && isFinite(Number(data.current.mean_c)) ? Number(data.current.mean_c) : null;
-  var rows = data && data.forecast ? data.forecast : [];
-  var values = current === null ? [] : [current].concat(rows.map(function (r) { return Number(r.temperature_c); }).filter(isFinite));
-  if (values.length < 2) {
-    document.getElementById("detailTrendDelta").textContent = "-";
-    document.getElementById("detailRisk").textContent = "等待数据";
-    return;
-  }
-  var delta = values[values.length - 1] - values[0];
-  var max = Math.max.apply(Math, values);
-  document.getElementById("detailTrendDelta").textContent = (delta >= 0 ? "+" : "") + delta.toFixed(1) + "°C";
-  document.getElementById("detailRisk").textContent = max >= 30 ? "中度风险" : "正常";
 }
 
 function renderForecast(data) {
@@ -815,32 +771,8 @@ function renderForecast(data) {
   var field = window.__lastHeatmap && window.__lastHeatmap.field;
   document.getElementById("fcField").textContent = field && field.sample_count
     ? ((window.__lastHeatmap.points || []).length + " 点") : "-";
-  var method = data && data.method;
-  if (method === "probe_air_history") {
-    status.textContent = "长历史趋势参考";
-    status.className = "forecast-status warn";
-  } else if (method === "warming_up") {
-    status.textContent = "积累有效历史中";
-    status.className = "forecast-status";
-  } else {
-    status.textContent = "等待数据";
-    status.className = "forecast-status";
-  }
-  var list = document.getElementById("forecastList");
-  var rows = data && data.forecast ? data.forecast : [];
-  if (!rows.length) {
-    var emptyForecast = document.createElement("div");
-    emptyForecast.className = "forecast-empty";
-    emptyForecast.textContent = data && data.note ? data.note : "等待有效历史数据";
-    list.replaceChildren(emptyForecast);
-  } else {
-    list.innerHTML = rows.map(function (r) {
-      return '<div class="forecast-row"><span class="forecast-hour">+' + r.hour + 'h</span>' +
-        '<b>' + Number(r.temperature_c).toFixed(1) + '°C</b>' +
-        '<span>' + Number(r.rh_pct).toFixed(1) + '%RH</span>' +
-        '<span class="forecast-weather">' + Number(r.sample_count) + ' 个测点</span></div>';
-    }).join("");
-  }
+  status.textContent = current.sample_count ? "实测与 IDW 插值" : "等待实测数据";
+  status.className = "forecast-status";
   var weather = data && data.weather ? data.weather : {};
   var weatherReady = weather.status === "ready" || weather.status === "ok";
   var source = weatherReady ? "天气源：" + esc(weather.source || "Open-Meteo") + " · 坐标 " +
@@ -848,9 +780,8 @@ function renderForecast(data) {
     (weather.status === "error" ? "天气源暂时不可用，已保留探杆历史趋势" :
       weather.status === "not_configured" ? "当前仓库尚未配置天气坐标" : "天气数据等待更新");
   document.getElementById("weatherSource").textContent = source;
-  document.getElementById("forecastNote").textContent = data && data.note
-    ? data.note : "预测需要长期有效探杆温湿度；单节点不代表整堆，非物理场求解。";
-  renderForecastSummary(data);
+  document.getElementById("forecastNote").textContent =
+    "仓内颜色为探杆实测点间的 IDW 空间估算；温湿度预测统一显示在上方单节点模型区。天气为外部网格背景数据，不代表仓内实测。";
 }
 
 function renderHistoryPlot(samples) {
@@ -1046,8 +977,8 @@ function renderAlerts(alerts) {
       "<td>" + fmtTime(a.begin_ts) + (a.end_ts ? " → " + fmtTime(a.end_ts) : "") + "</td>" +
       "<td>" + esc(a.uid) + "</td>" +
       "<td>" + a.node_addr + "</td>" +
-      "<td>" + (a.source === "weather_forecast" ? "天气辅助预测 +" + Number(a.forecast_hour) + "h · " :
-        a.source === "forecast" ? "探杆趋势预测 +" + Number(a.forecast_hour) + "h · " : "实测 · ") + (a.ch === "temp" ? "温度" : "相对湿度") + "</td>" +
+      "<td>" + (a.source === "weather_forecast" ? "旧天气模型预测记录 +" + Number(a.forecast_hour) + "h · " :
+        a.source === "forecast" ? "统一模型预测 +" + Number(a.forecast_hour) + "h · " : "实测 · ") + (a.ch === "temp" ? "温度" : "相对湿度") + "</td>" +
       "<td>" + (isFinite(Number(a.value)) ? Number(a.value).toFixed(2) : "-") + "</td>" +
       "<td>" + (isFinite(Number(a.th)) ? Number(a.th).toFixed(2) : "-") + "</td>" +
       "<td>" + (a.active ? '<span class="badge alarm">告警中</span>'
@@ -1071,13 +1002,10 @@ function updateBanner() {
     .sort().join("|");
   if (over.length || measuredAlerts.length || forecastAlerts.length) {
     banner.classList.remove("hidden");
-    var trendAlerts = forecastAlerts.filter(function (a) { return a.source !== "weather_forecast"; });
-    var weatherAlerts = forecastAlerts.filter(function (a) { return a.source === "weather_forecast"; });
     var summary = [];
     if (over.length) summary.push("设备告警 " + over.length + " 根");
     if (measuredAlerts.length) summary.push("实测越限 " + measuredAlerts.length + " 项");
-    if (trendAlerts.length) summary.push("趋势预测越限 " + trendAlerts.length + " 项");
-    if (weatherAlerts.length) summary.push("天气辅助预警 " + weatherAlerts.length + " 项");
+    if (forecastAlerts.length) summary.push("已验证统一模型预测越限 " + forecastAlerts.length + " 项");
     document.getElementById("alertText").textContent = "⚠ 当前风险：" + summary.join(" · ") + " · 完整明细见告警记录";
     if (soundOn && soundSignature && soundSignature !== lastAlertSoundSignature) beep();
   } else {

@@ -135,66 +135,49 @@
       liveEmpty("暂时没有可显示的探杆预测。");
       return;
     }
-    var station = data.station_prediction || {};
-    var s3 = data.s3_prediction || {};
-    var sources = [
-      { title: "电脑端独立预测", status: station.status,
-        meta: "由 Station 历史数据库独立重算。",
-        points: station.status === "ready" ? (station.forecast || []) : [] },
-      { title: "S3 探杆端预测", status: s3.status,
-        meta: "由 S3 计算并随快照上报；旧短窗结果会被过滤。",
-        points: s3.status === "ready" ? (s3.points || []).map(function (point) {
-          return { hour: point.hour, temperature_c: point.temp, rh_pct: point.rh };
-        }) : [] },
-    ];
-    var hasAny = sources.some(function (source) { return source.points.length > 0; });
-    if (!hasAny) {
-      var statusLine = sources.map(function (source) {
-        if (source.status === "stale") return source.title + "数据已过期或设备离线";
-        if (source.status === "warming_up") return source.title + "正在积累有效历史";
-        if (source.status === "ready") return source.title + "暂无可用时域";
-        return source.title + "尚无上报记录";
-      }).join("；") + "。";
-      $("probeForecastStatus").textContent = statusLine;
-      liveEmpty(statusLine + "+1h 至少需要 2.5h、+3h 需要 6h、+6h 需要 12h 历史；短时间斜率不会伪装成小时预测。");
+    var prediction = data.unified_prediction || {};
+    var model = data.model || {};
+    var points = Array.isArray(prediction.forecast) ? prediction.forecast : [];
+    var label = prediction.status === "ready" ? "统一模型 · 已验证输出" :
+      prediction.status === "candidate" ? "统一模型 · 当前输出未通过基线验证" :
+      prediction.status === "stale" ? "节点数据过期" :
+      prediction.status === "warming_up" ? "等待新鲜节点读数" : "持续性基线 · 无需预热";
+    $("probeForecastStatus").textContent = label + "；Station / S3 模型 v" +
+      Number(model.version || 0) + (model.device_synced ? " 已同步" : " 尚未同步") +
+      "；预测仅代表测点附近空气状态。";
+    if (!points.length) {
+      liveEmpty(prediction.reason === "probe_measurement_stale"
+        ? "节点最新读数过期，不使用陈旧数据外推。"
+        : "尚无新鲜有效的节点读数；模型加载后无需重新积累长时间 RAM 历史。 ");
       return;
     }
-    $("probeForecastStatus").textContent = "已读取探杆历史预测；仅代表测点附近空气状态。";
-    for (var source of sources) {
-      var article = make("article", "crop-live-source");
-      article.appendChild(make("h3", "", source.title));
-      article.appendChild(make("p", "crop-live-source-meta", source.meta));
-      var pointsHost = make("div", "crop-live-points");
-      if (!source.points.length) {
-        var emptyMessage = source.status === "stale"
-          ? "快照已过期或探杆离线，当前值不能作为有效预测。"
-          : source.status === "warming_up"
-            ? "该来源的有效历史尚不足以开放此时域。"
-            : "该来源尚未产生有效预测。";
-        pointsHost.appendChild(make("div", "crop-live-empty", emptyMessage));
-      } else {
-        var rows = await Promise.all(source.points.map(async function (point) {
-          return { point: point, emc: await calculateForecastEmc(
-            point.temperature_c, point.rh_pct) };
-        }));
-        if (token !== forecastRenderToken) return;
-        rows.forEach(function (row) {
-          var point = row.point;
-          var card = make("div", "crop-live-point");
-          card.appendChild(make("b", "", "+" + Number(point.hour) + " 小时"));
-          card.appendChild(make("strong", "", Number(point.temperature_c).toFixed(1) + " °C"));
-          card.appendChild(make("span", "", Number(point.rh_pct).toFixed(1) + " %RH"));
-          card.appendChild(make("small", "", row.emc));
-          pointsHost.appendChild(card);
-        });
-      }
-      article.appendChild(pointsHost);
-      host.appendChild(article);
-    }
+    var article = make("article", "crop-live-source");
+    article.appendChild(make("h3", "", "Station 与 S3 共用的温湿度模型"));
+    article.appendChild(make("p", "crop-live-source-meta",
+      "模型参数由仓库历史训练；各温度/湿度时域分别按时间留出与持续性基线比较。未达标的通道显示当前值基线，不触发预测告警或采样控制。"));
+    var pointsHost = make("div", "crop-live-points");
+    var rows = await Promise.all(points.map(async function (point) {
+      return { point: point, emc: await calculateForecastEmc(
+        point.temperature_c, point.rh_pct) };
+    }));
+    if (token !== forecastRenderToken) return;
+    rows.forEach(function (row) {
+      var point = row.point;
+      var card = make("div", "crop-live-point");
+      card.appendChild(make("b", "", "+" + Number(point.hour) + " 小时"));
+      card.appendChild(make("strong", "", Number(point.temperature_c).toFixed(1) + " °C"));
+      card.appendChild(make("span", "", Number(point.rh_pct).toFixed(1) + " %RH"));
+      card.appendChild(make("small", "", "温度 " + (point.temperature_validated ? "模型已验证" : "持续性基线") +
+        " · 湿度 " + (point.rh_validated ? "模型已验证" : "持续性基线")));
+      card.appendChild(make("small", "", row.emc));
+      pointsHost.appendChild(card);
+    });
+    article.appendChild(pointsHost);
+    host.appendChild(article);
     var risk = data.risk || {};
     if (risk.active) {
       host.appendChild(make("div", "crop-live-empty",
-        "存在实测超限或某来源的趋势预测越限；请查看电脑端告警中心并核对原始测量。预测提示与实测告警分开。"));
+        "存在实测超限或统一模型预测越限；请查看电脑端告警中心并核对原始测量。预测提示与实测告警分开。"));
     }
   }
 
@@ -254,7 +237,7 @@
     var split = selected.lastIndexOf("|");
     var uid = selected.slice(0, split);
     var addr = selected.slice(split + 1);
-    $("probeForecastStatus").textContent = "正在读取 S3 与电脑端预测…";
+    $("probeForecastStatus").textContent = "正在读取统一预测结果…";
     try {
       var data = await apiGet("/api/v1/probe-forecast?uid=" +
         encodeURIComponent(uid) + "&addr=" + encodeURIComponent(addr));

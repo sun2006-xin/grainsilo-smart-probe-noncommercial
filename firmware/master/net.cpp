@@ -13,6 +13,7 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <ctype.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -68,6 +69,43 @@ static bool json_integer(const char *json, const char *key, int64_t *out)
     return true;
 }
 
+static bool json_float(const char *json, const char *key, float *out)
+{
+    const char *p = json_value(json, key);
+    if (!p || !out) return false;
+    char *end = NULL;
+    const float value = strtof(p, &end);
+    if (end == p || !isfinite(value) ||
+        (*end != ',' && *end != '}' && !isspace((unsigned char)*end)))
+        return false;
+    *out = value;
+    return true;
+}
+
+static bool json_float_array(const char *json, const char *key,
+                             float *out, size_t count)
+{
+    const char *p = json_value(json, key);
+    if (!p || !out) return false;
+    while (*p && isspace((unsigned char)*p)) ++p;
+    if (*p++ != '[') return false;
+    for (size_t i = 0u; i < count; ++i) {
+        while (*p && isspace((unsigned char)*p)) ++p;
+        char *end = NULL;
+        const float value = strtof(p, &end);
+        if (end == p || !isfinite(value) || fabsf(value) > 10000.0f) return false;
+        out[i] = value;
+        p = end;
+        while (*p && isspace((unsigned char)*p)) ++p;
+        if (i + 1u < count) {
+            if (*p++ != ',') return false;
+        } else if (*p != ']') {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void parse_response_cmd(const char *json, char *out, size_t capacity)
 {
     if (!out || capacity == 0u) return;
@@ -87,6 +125,33 @@ static void parse_remote_settings(const char *json, net_remote_settings_t *setti
 {
     if (!settings) return;
     memset(settings, 0, sizeof(*settings));
+
+    int64_t model_version, validated_mask;
+    if (json_integer(json, "version", &model_version) &&
+        json_integer(json, "validated_mask", &validated_mask) &&
+        model_version > 0 && model_version <= UINT32_MAX &&
+        validated_mask >= 0 && validated_mask <= 0x3F &&
+        json_float_array(json, "parameters", settings->forecast_parameters,
+                         GS_UF_PARAMETER_COUNT)) {
+        settings->forecast_model_present = true;
+        settings->forecast_model_version = (uint32_t)model_version;
+        settings->forecast_validated_mask = (uint8_t)validated_mask;
+    }
+
+    int64_t weather_age;
+    float weather_temperature, weather_rh;
+    if (json_integer(json, "age_seconds", &weather_age) &&
+        json_float(json, "temperature_c", &weather_temperature) &&
+        json_float(json, "rh_pct", &weather_rh) &&
+        weather_age >= 0 && weather_age <= 10800 &&
+        weather_temperature >= -40.0f && weather_temperature <= 125.0f &&
+        weather_rh >= 0.0f && weather_rh <= 100.0f) {
+        settings->forecast_weather_present = true;
+        settings->forecast_weather_age_sec = (uint32_t)weather_age;
+        settings->forecast_weather_temperature_c = weather_temperature;
+        settings->forecast_weather_rh_pct = weather_rh;
+    }
+
     int64_t revision, temp_high, temp_low, rh_high, rh_low, normal_sec, fast_sec;
     if (!json_integer(json, "revision", &revision) ||
         !json_integer(json, "temp_high_centi", &temp_high) ||
